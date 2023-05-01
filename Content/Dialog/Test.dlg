@@ -1,0 +1,23 @@
+[
+  [
+    {
+      "id": "2",
+      "type": "Npc",
+      "position": { "x": -389.93478717451836, "y": 353.2450528965184 },
+      "size": { "width": "250", "height": "100" },
+      "title": "",
+      "text": "What do you want?",
+      "data": []
+    },
+    {
+      "id": "3",
+      "type": "Player",
+      "position": { "x": -76.93478717451823, "y": 351.2450528965184 },
+      "size": { "width": "250", "height": "100" },
+      "title": "",
+      "text": "Nothing...",
+      "data": []
+    }
+  ],
+  [ { "source": "2", "sourceHandle": "out", "target": "3", "targetHandle": "in" } ]
+]

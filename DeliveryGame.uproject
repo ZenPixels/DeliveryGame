@@ -17,8 +17,13 @@
 		},
 		{
 			"Name": "DialogueSx",
-			"Enabled": true,
+			"Enabled": false,
 			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/401cd4398af24470a14e79637f383d4e"
+		},
+		{
+			"Name": "Narrative",
+			"Enabled": true,
+			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/b03174e0a1cc4de4b17dcfb2a0ba6884"
 		}
 	]
 }

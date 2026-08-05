@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.3",
+	"EngineAssociation": "5.8",
 	"Category": "",
 	"Description": "",
 	"Plugins": [
@@ -25,9 +25,8 @@
 			"Enabled": true
 		},
 		{
-			"Name": "ArcadeVehicleSystem",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/31c6df7690794c0ca73171095eb8ec2f"
+			"Name": "ModelContextProtocol",
+			"Enabled": true
 		}
 	]
 }

@@ -142,6 +142,13 @@ void ADGPathDeciderActor::OnDecisionBoxBeginOverlap(
 		return;
 	}
 
+	// A vehicle that committed to a route moments ago — its planned handoff just fired — keeps it.
+	// Handing out a second decision mid-crossing yanks the goal sideways at the worst moment.
+	if (Vehicle->PathFollow->GetTimeSinceLastPathChange() < 4.f)
+	{
+		return;
+	}
+
 	ADGPathActor* NewPath = ChoosePathFor(Vehicle);
 	if (!NewPath)
 	{
@@ -157,7 +164,7 @@ void ADGPathDeciderActor::OnDecisionBoxBeginOverlap(
 
 	Vehicle->PathFollow->SetPath(NewPath, bSnapToClosestPoint);
 
-	UE_LOG(LogDeliveryGame, Verbose, TEXT("%s routed %s onto %s"),
+	UE_LOG(LogDeliveryGame, Log, TEXT("%s routed %s onto %s"),
 		*GetName(), *Vehicle->GetName(), *NewPath->GetName());
 }
 
@@ -165,7 +172,7 @@ void ADGPathDeciderActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!bDrawDebug || !DecisionBox)
+	if (!bDrawDebug || !CVarDGTrafficDebugDraw.GetValueOnGameThread() || !DecisionBox)
 	{
 		return;
 	}

@@ -6,7 +6,6 @@
 #include "GameFramework/Actor.h"
 #include "DGTrafficLightActor.generated.h"
 
-class ADGAIVehiclePawn;
 class UBoxComponent;
 class USceneComponent;
 
@@ -23,19 +22,15 @@ enum class EDGSignalState : uint8
 };
 
 /**
- * Holds AI vehicles at a traffic signal. Native replacement for BP_Prop_Traffic_Light_Sm's
- * Begin Play delay chain.
+ * A traffic signal. Native replacement for BP_Prop_Traffic_Light_Sm's Begin Play delay chain.
  *
- * Cycles Green -> Yellow -> Red -> Green. Vehicles overlapping the trigger volume are held whenever
- * the aspect is **not** green, matching the original, which switched the zone's overlap events off on
- * green and on for yellow and red.
+ * Cycles Green -> Yellow -> Red -> Green and **publishes state only** — it holds nothing itself.
+ * Each ADGAIVehiclePawn polls the registered signals every tick (UpdateSignalHold) and stops when
+ * one shows a stop aspect *and* IsActorInZone says the vehicle is inside its volume. Vehicles are
+ * held on yellow as well as red, matching the original, which armed its zone for both.
  *
- * **Creates no components** — it resolves the ones the Blueprint already owns (the box volume plus the
- * red / yellow / green light meshes), like ADGPathActor and ADGPathDeciderActor. Reparent
- * BP_Prop_Traffic_Light_Sm onto this class and its existing components are picked up.
- *
- * The hold uses UDGPathFollowComponent::SetSignalHold rather than StopMoving, so it is a distinct
- * flag from traffic blocking and cannot be released by the deadlock timeout.
+ * **Creates no components** — it resolves the ones the Blueprint already owns (the box volume plus
+ * the red / yellow / green light meshes), like ADGPathActor and ADGPathDeciderActor.
  */
 UCLASS(Blueprintable, ClassGroup = (Traffic), meta = (DisplayName = "Traffic Light"))
 class DELIVERYGAME_API ADGTrafficLightActor : public AActor
@@ -92,7 +87,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal|Debug")
 	bool bDrawDebug = false;
 
-	/** Set the aspect, releasing every held vehicle when it turns green. */
+	/** Set the aspect. Vehicles notice on their next poll; nothing is pushed. */
 	UFUNCTION(BlueprintCallable, Category = "Signal")
 	void SetSignalState(EDGSignalState NewState);
 
@@ -104,8 +99,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Signal")
 	bool IsStopAspect() const { return SignalState != EDGSignalState::Green; }
 
+	/**
+	 * True if this signal's volume currently contains Actor.
+	 *
+	 * Vehicles call this each update to decide for themselves whether to stop. The signal no longer
+	 * pushes a hold onto them: a push leaves the flag set if the release is ever missed — an exit
+	 * event lost, two lights sharing one boolean, a light destroyed mid-hold — which stranded a van
+	 * 50 m from the nearest junction.
+	 */
 	UFUNCTION(BlueprintPure, Category = "Signal")
-	int32 GetNumHeldVehicles() const { return HeldVehicles.Num(); }
+	bool IsActorInZone(const AActor* Actor) const;
+
+	/**
+	 * Distance along Forward from From to this zone's near face, or -1 when the line never enters the
+	 * zone. Vehicles use it to brake smoothly toward the stop line of a red or yellow ahead — and
+	 * because it is a line-through-box test, a pad in the opposite lane or on the cross street misses
+	 * and cannot brake traffic it does not govern.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Signal")
+	float GetStopLineDistance(const FVector& From, const FVector& Forward) const;
 
 	/** Seconds the current aspect lasts. */
 	UFUNCTION(BlueprintPure, Category = "Signal")
@@ -116,32 +128,11 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	UFUNCTION()
-	void OnSignalBoxBeginOverlap(
-		UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp,
-		int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
-
-	UFUNCTION()
-	void OnSignalBoxEndOverlap(
-		UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp,
-		int32 OtherBodyIndex);
-
 private:
 	void ResolveComponents();
 
 	/** Show only the lamp for the current aspect. */
 	void UpdateLampVisibility();
-
-	/** Hold or release one vehicle, keeping HeldVehicles in step. */
-	void ApplyHold(ADGAIVehiclePawn* Vehicle, bool bHold);
-
-	/** Hold every vehicle currently inside the volume. */
-	void HoldAllInVolume();
-
-	void ReleaseAll();
-
-	/** Vehicles held by this signal, so each is released exactly once. */
-	TSet<TWeakObjectPtr<ADGAIVehiclePawn>> HeldVehicles;
 
 	float TimeInState = 0.f;
 

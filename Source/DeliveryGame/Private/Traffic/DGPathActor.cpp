@@ -17,6 +17,36 @@ ADGPathActor::ADGPathActor()
 	// leaves the construction script reading None.
 }
 
+void ADGPathActor::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+
+	// Only an authored RoutePoints array rebuilds the spline; hand-edited splines stay untouched.
+	if (RoutePoints.Num() < 2)
+	{
+		return;
+	}
+
+	ResolveRouteSpline();
+	USplineComponent* Spline = RouteSpline;
+	if (!Spline)
+	{
+		// A bare native ADGPathActor owns no spline — the component comes from the BP_Path Blueprint.
+		UE_LOG(LogDeliveryGame, Warning,
+			TEXT("%s has RoutePoints but no spline component to rebuild. Spawn BP_Path rather than "
+				 "the native class."), *GetName());
+		return;
+	}
+
+	Spline->ClearSplinePoints(/*bUpdateSpline=*/false);
+	for (const FVector& Point : RoutePoints)
+	{
+		Spline->AddSplinePoint(Point, ESplineCoordinateSpace::Local, /*bUpdateSpline=*/false);
+	}
+	Spline->SetClosedLoop(bClosedLoopRoute, /*bUpdateSpline=*/false);
+	Spline->UpdateSpline();
+}
+
 USplineComponent* ADGPathActor::GetRouteSpline() const
 {
 	ResolveRouteSpline();
@@ -184,7 +214,7 @@ void ADGPathActor::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 
 	const USplineComponent* Spline = GetRouteSpline();
-	if (!bDrawDebug || !Spline)
+	if (!bDrawDebug || !CVarDGTrafficDebugDraw.GetValueOnGameThread() || !Spline)
 	{
 		return;
 	}

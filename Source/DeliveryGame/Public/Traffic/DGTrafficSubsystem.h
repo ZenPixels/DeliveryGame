@@ -7,6 +7,7 @@
 #include "DGTrafficSubsystem.generated.h"
 
 class ADGPathActor;
+class ADGTrafficLightActor;
 
 /**
  * Registry of traffic paths in the world.
@@ -41,7 +42,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Traffic")
 	int32 GetNumRegisteredPaths() const { return RegisteredPaths.Num(); }
 
+	// ------------------------------------------------------------- Signals
+	//
+	// Lights register here so vehicles can *ask* which signals apply to them, rather than signals
+	// pushing a hold onto vehicles. A pull model recomputes from ground truth every update, so a
+	// stale hold — a vehicle stopped by a light it is nowhere near — cannot survive a single frame.
+
+	void RegisterLight(ADGTrafficLightActor* Light);
+	void UnregisterLight(ADGTrafficLightActor* Light);
+
+	UFUNCTION(BlueprintPure, Category = "Traffic")
+	TArray<ADGTrafficLightActor*> GetRegisteredLights() const;
+
 private:
 	UPROPERTY()
 	TArray<TObjectPtr<ADGPathActor>> RegisteredPaths;
+
+	UPROPERTY()
+	TArray<TObjectPtr<ADGTrafficLightActor>> RegisteredLights;
 };

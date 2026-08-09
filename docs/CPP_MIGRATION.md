@@ -282,28 +282,59 @@ Behaviour added after the reparent, in the order the failures surfaced:
 | Wide turns, left the road | fixed 600 cm look-ahead; no slowing before corners | speed-scaled look-ahead; `GetCornerSpeedScale` |
 | Rear-ended stopped traffic | detection volume never worked; distance-only following | volume set from code; closing-speed braking |
 | Stopped and never restarted | `StopMoving` was terminal | `bAutoResume`; wider continuation radius |
-| Beached off-road | no recovery from an unsteerable position | `UpdateStuckRecovery` → `SnapToLane` |
+| Beached off-road | no recovery from an unsteerable position | `UpdateStuckRecovery`: park, retry after `StuckRetryDelay` |
 
 Tuning knobs, all on `UDGPathFollowComponent` unless noted: `LateralOffset` 254.89,
 `LaneCorrectionGain` 2.0, `LaneDampingGain` 0.7, `MinAimDistance` 220, `AimTimeAhead` 0.55,
 `FollowHeadwaySeconds` 1.6, `ComfortableDeceleration` 350, `MinCornerSpeedScale` 0.35,
 `SpeedLimitCompliance` 1.0, and `ADGPathActor::SpeedLimitMPH` per road.
 
+## Traffic is kinematic (author decision, 2026-08-09)
+
+`UDGPathFollowComponent::MoveMode` — **Kinematic** (default) integrates speed
+(`KinematicAcceleration` / `KinematicBraking`), swings heading toward the goal at `KinematicYawRate`,
+and sets the transform each tick; the mesh stops simulating but keeps collision. **Physics** remains
+switchable per vehicle for A/B. All decision logic (plans, signals, follow gaps, corner speeds) is
+shared — kinematic just obeys it exactly.
+
+Why: after the logic layer was proven sound by the event log, every remaining bug was Chaos —
+manual gearboxes failing to launch after holds (three vans in one trace), kerb understeer, brake
+authority. The author wants arcade traffic and had considered dropping Chaos outright. Decision was
+"hybrid: kinematic until hit" — **switching a vehicle to physics on player impact is the agreed
+later layer**, as is a ground trace replacing the held Z when terrain stops being flat.
+
+Consequences to know: speed must be read via `GetVehicleSpeed()` (kinematic pawns report zero
+physics velocity — actor/Chaos velocity reads silently break following); `ShouldBlockFor` accepts
+any `AWheeledVehiclePawn` because nothing physical stops a kinematic van from driving through the
+player; a stuck vehicle re-acquires and keeps driving (author rule: **nothing stops unless
+explicitly stopped**).
+
+## Standing rule: no teleporting vehicles (author, 2026-08-09)
+
+Stuck recovery must never relocate a vehicle. The aim point always sits on the lane, so anything
+that can move is already steering back; a vehicle that genuinely cannot move **parks**, waits
+`StuckRetryDelay`, and tries again. `SnapToLane` (teleport recovery) existed briefly and was
+removed on the author's direction — the eventual real fix is **vehicle reverse logic**, which is
+planned but unbuilt.
+
 ## Next session
 
-1. **Detection range does not scale with speed.** The traffic volume reaches 26 m
-   (`TrafficColliderExtent.X` 1150 at offset 1450), enough to brake from ~25 mph and no more. Raising
-   any speed limit much past 25 needs that derived from speed rather than left as a constant.
-2. **Cross-traffic false stops.** The volume is 23 m long and 1.8 m wide, so on a curve or through a
-   junction it can sweep into another lane and stop for a vehicle that is not really in the way.
-   `ShouldBlockFor` currently accepts any `ADGAIVehiclePawn`; filtering by heading alignment would fix
-   it if observed.
-3. **Signal holds are a single bool**, not reference counted. Two overlapping light volumes could have
-   one release a hold the other still wants.
-4. **Lane splines.** Agreed direction for the city map: replace centreline splines with one-way lane
-   splines, generated from the existing centrelines rather than hand-authored — the author's blocker
-   was tedium, so build the generator first. Removes both the lateral-offset and travel-direction
-   machinery entirely.
+1. **Right-of-way at junctions** — the top behavioural gap. Two vehicles meeting inside a junction
+   mutually yield via the follow channel and can stand nose-to-nose. Under kinematic movement this is
+   now a pure priority decision ("who waits"), no physics involved. Also covers left-turners crossing
+   the oncoming green stream.
+2. **Road network build-out over MCP** — more stretches, 3-way junctions, closed loops (see
+   [[road-network-plans]] in memory). `ADGPathActor::RoutePoints` is the authoring hook; kinematic
+   movement makes new junction geometry much safer to add.
+3. **Physics-on-player-impact** — the second half of the "hybrid" decision: an AI vehicle hit by the
+   player flips to simulation. Also cosmetic kinematic motion (wheel spin, body lean).
+4. **Signal holds are a single bool**, not reference counted — two overlapping light volumes could
+   fight. Cheap fix when touched next.
+5. **Lane splines** for the city map: one-way lane splines generated from centrelines, removing the
+   lateral-offset and travel-direction machinery entirely. Point-to-point routing and driver
+   personalities (see memory) land naturally in the same era.
+6. The old physics-mode caveats (detection range vs speed, cross-traffic sweeps) still apply to any
+   vehicle left in Physics mode, but are moot for kinematic traffic.
 
 ## Not yet done
 

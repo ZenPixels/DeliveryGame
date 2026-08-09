@@ -9,6 +9,8 @@
 #include "DeliveryGame.h"
 #include "DrawDebugHelpers.h"
 #include "Traffic/DGPathFollowComponent.h"
+#include "Traffic/DGTrafficLightActor.h"
+#include "Traffic/DGTrafficSubsystem.h"
 
 ADGAIVehiclePawn::ADGAIVehiclePawn(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -71,6 +73,27 @@ void ADGAIVehiclePawn::ResolveComponents()
 		UE_LOG(LogDeliveryGame, Warning,
 			TEXT("%s has no Path Follow component; it will not drive. Add one, or check that "
 				 "BP_Path_Follow has been reparented onto UDGPathFollowComponent."), *GetName());
+	}
+
+	// bReverseAsBrake stays ON, deliberately. These vehicles are authored with manual gearboxes
+	// (TransmissionSetup.bUseAutomaticGears = false), and arcade mode is the only thing that engages
+	// a forward gear from throttle input — disabling it left every vehicle revving in neutral, unable
+	// to launch. Its downside (held brake at standstill = reverse throttle) is prevented instead by
+	// ApplyHoldOutputs, which parks on the handbrake with the pedal released.
+
+	// Kinematic traffic does not simulate: the transform is set directly each tick, so the body must
+	// not fight the mover and the drivetrain has nothing to do. Collision stays on — the mesh acts as
+	// a solid obstacle the player's physics vehicle can hit.
+	if (PathFollow && PathFollow->MoveMode == EDGPathFollowMoveMode::Kinematic)
+	{
+		if (USkeletalMeshComponent* VehicleMesh = GetMesh())
+		{
+			VehicleMesh->SetSimulatePhysics(false);
+		}
+		if (UChaosVehicleMovementComponent* Movement = GetVehicleMovementComponent())
+		{
+			Movement->SetComponentTickEnabled(false);
+		}
 	}
 
 	RouteCollider = FindBox(TEXT("routing"), TEXT("Route"));
@@ -163,8 +186,11 @@ bool ADGAIVehiclePawn::ShouldBlockFor_Implementation(AActor* OtherActor) const
 		return false;
 	}
 
-	// Other traffic holds us; scenery and the player on foot do not.
-	return OtherActor->IsA<ADGAIVehiclePawn>();
+	// Any wheeled vehicle holds us — AI traffic *and the player's*. Restricting this to AI pawns
+	// mattered little under physics (colliding with the player at least stopped the AI); under
+	// kinematic movement nothing physical stops us, so the follow logic is the only thing standing
+	// between a van and driving straight through the player's parked jeep.
+	return OtherActor->IsA<AWheeledVehiclePawn>();
 }
 
 void ADGAIVehiclePawn::RecomputeOverlapBlockers()
@@ -207,7 +233,38 @@ void ADGAIVehiclePawn::UpdateTrafficClearance()
 	// "directly ahead" the way a raw centre-to-centre distance would.
 	const FVector SelfLocation = GetActorLocation();
 	const FVector Forward = GetActorForwardVector().GetSafeNormal();
-	const FVector SelfVelocity = GetVelocity();
+
+	// Velocity of any vehicle, whichever way it moves: a kinematically-driven pawn reports zero
+	// physics velocity, which would read as "parked" and break closing-speed braking entirely.
+	auto VelocityOf = [](const AActor* Actor) -> FVector
+	{
+		if (const ADGAIVehiclePawn* AIPawn = Cast<ADGAIVehiclePawn>(Actor))
+		{
+			if (AIPawn->PathFollow && AIPawn->PathFollow->MoveMode == EDGPathFollowMoveMode::Kinematic)
+			{
+				return Actor->GetActorForwardVector() * AIPawn->PathFollow->GetVehicleSpeed();
+			}
+		}
+		return Actor->GetVelocity();
+	};
+
+	const FVector SelfVelocity = VelocityOf(this);
+
+	// Half-length of a mesh's world bounds as seen along Direction. Gaps must be bumper-to-bumper:
+	// centre-to-centre distances hide half of each vehicle's length as phantom cushion, which is how
+	// followers kept ramming the bus — its centre sits a long way from its rear bumper. Mesh bounds
+	// specifically, never actor bounds: those include the 25 m detection volume.
+	auto HalfLengthAlong = [](const USkeletalMeshComponent* BodyMesh, const FVector& Direction) -> float
+	{
+		if (!BodyMesh)
+		{
+			return 250.f; // roughly half a van, if there is no mesh to measure
+		}
+		const FVector E = BodyMesh->Bounds.BoxExtent;
+		return FMath::Abs(E.X * Direction.X) + FMath::Abs(E.Y * Direction.Y) + FMath::Abs(E.Z * Direction.Z);
+	};
+
+	const float SelfHalf = HalfLengthAlong(GetMesh(), Forward);
 
 	float NearestAhead = TNumericLimits<float>::Max();
 	float ClosingSpeed = 0.f;
@@ -220,14 +277,39 @@ void ADGAIVehiclePawn::UpdateTrafficClearance()
 			continue;
 		}
 
-		const float AlongForward = FVector::DotProduct(Other->GetActorLocation() - SelfLocation, Forward);
-		if (AlongForward > 0.f && AlongForward < NearestAhead)
+		const FVector ToOther = Other->GetActorLocation() - SelfLocation;
+		const float AlongForward = FVector::DotProduct(ToOther, Forward);
+		if (AlongForward <= 0.f)
 		{
-			NearestAhead = AlongForward;
+			continue;
+		}
+
+		const ADGAIVehiclePawn* OtherPawn = Cast<ADGAIVehiclePawn>(Other);
+		const float OtherHalf = HalfLengthAlong(OtherPawn ? OtherPawn->GetMesh() : nullptr, Forward);
+		const float BumperGap = FMath::Max(0.f, AlongForward - SelfHalf - OtherHalf);
+
+		// Oncoming traffic in the adjacent lane is not an obstacle. Mid-turn, the long detection box
+		// sweeps across the oncoming queue, and treating those vehicles as "ahead" froze the turner
+		// mid-junction facing across the road (author's diagnosis, confirmed by mechanism). Oncoming
+		// only counts when it is genuinely head-on in our lane and close.
+		const float HeadingDot = FVector::DotProduct(
+			Forward, Other->GetActorForwardVector().GetSafeNormal2D());
+		if (HeadingDot < -0.4f)
+		{
+			const float Lateral = FMath::Abs(ToOther.X * Forward.Y - ToOther.Y * Forward.X);
+			if (Lateral > 150.f || BumperGap > 450.f)
+			{
+				continue;
+			}
+		}
+
+		if (BumperGap < NearestAhead)
+		{
+			NearestAhead = BumperGap;
 
 			// Relative velocity along our heading: how fast this gap is actually shrinking. A parked
 			// or braking vehicle yields a large closing speed; one matching our speed yields zero.
-			ClosingSpeed = FVector::DotProduct(SelfVelocity - Other->GetVelocity(), Forward);
+			ClosingSpeed = FVector::DotProduct(SelfVelocity - VelocityOf(Other), Forward);
 		}
 	}
 
@@ -246,6 +328,75 @@ void ADGAIVehiclePawn::OnColliderEndOverlap(
 	int32 /*OtherBodyIndex*/)
 {
 	RecomputeOverlapBlockers();
+}
+
+void ADGAIVehiclePawn::UpdateSignalAwareness()
+{
+	if (!PathFollow)
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const UDGTrafficSubsystem* Traffic = World ? World->GetSubsystem<UDGTrafficSubsystem>() : nullptr;
+	if (!Traffic)
+	{
+		return;
+	}
+
+	const FVector Location = GetActorLocation();
+	const FVector Forward = GetActorForwardVector().GetSafeNormal2D();
+
+	// Mode-aware speed: kinematic pawns report zero physics velocity, which would make every in-zone
+	// vehicle read as "queueing" (frozen mid-junction on a flip) and disable the amber dilemma.
+	const float Speed = PathFollow->GetVehicleSpeed();
+
+	// Recomputed from scratch every tick. Because the answer is derived rather than remembered, a
+	// hold cannot outlive the condition that caused it.
+	bool bShouldHold = false;
+	float NearestStopLine = 1000000.f;
+
+	for (const ADGTrafficLightActor* Light : Traffic->GetRegisteredLights())
+	{
+		if (!Light || !Light->IsStopAspect())
+		{
+			continue;
+		}
+
+		if (Light->IsActorInZone(this))
+		{
+			// Crossing at speed when the aspect flipped: committed — complete the manoeuvre rather
+			// than freezing mid-junction. Only a vehicle at queueing speed holds.
+			if (Speed <= SignalCommitSpeed)
+			{
+				bShouldHold = true;
+			}
+			continue;
+		}
+
+		const float Distance = Light->GetStopLineDistance(Location, Forward);
+		if (Distance < 0.f || Distance > SignalDetectionRange)
+		{
+			continue;
+		}
+
+		// Amber dilemma: if stopping from here would take more than comfortable braking, carry on —
+		// the commitment rule above covers the crossing. A red is braked for regardless.
+		if (Light->SignalState == EDGSignalState::Yellow && PathFollow->ComfortableDeceleration > 0.f)
+		{
+			const float UsableDistance = FMath::Max(Distance - 150.f, 50.f);
+			const float RequiredDeceleration = (Speed * Speed) / (2.f * UsableDistance);
+			if (RequiredDeceleration > PathFollow->ComfortableDeceleration)
+			{
+				continue;
+			}
+		}
+
+		NearestStopLine = FMath::Min(NearestStopLine, Distance);
+	}
+
+	PathFollow->SetSignalHold(bShouldHold);
+	PathFollow->SetSignalStopAhead(NearestStopLine);
 }
 
 void ADGAIVehiclePawn::SyncBlockedState()
@@ -323,7 +474,9 @@ void ADGAIVehiclePawn::Tick(float DeltaSeconds)
 		UpdateTrafficClearance();
 	}
 
-	if (bDrawDebugColliders)
+	UpdateSignalAwareness();
+
+	if (bDrawDebugColliders && CVarDGTrafficDebugDraw.GetValueOnGameThread())
 	{
 		const UWorld* World = GetWorld();
 		auto DrawVolume = [World](const UBoxComponent* Volume, const FColor& Color)

@@ -116,11 +116,31 @@ public:
 	 * `X - Extent.X` to `X + Extent.X` ahead, which must cover the braking distance at cruise speed.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Colliders")
-	FVector TrafficColliderOffset = FVector(1450.f, 0.f, 30.f);
+	FVector TrafficColliderOffset = FVector(1300.f, 0.f, 30.f);
 
-	/** Half-extent of the traffic volume. Y should be about a lane half-width. */
+	/**
+	 * Half-extent of the traffic volume. Y should be about a lane half-width.
+	 *
+	 * **Keep `Offset.X - Extent.X` near zero.** At 1450/1150 the volume began 300 cm ahead of the
+	 * vehicle, leaving a blind spot right in front of the bumper: a follower that closed inside 3 m
+	 * lost sight of the car ahead, cleared its clearance to "nothing there", and accelerated into it.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Colliders")
-	FVector TrafficColliderExtent = FVector(1150.f, 90.f, 60.f);
+	FVector TrafficColliderExtent = FVector(1250.f, 90.f, 60.f);
+
+	// --------------------------------------------------------------- Signals
+
+	/**
+	 * In-zone speed above which a stop aspect is ignored: the vehicle is already crossing, so it
+	 * completes the manoeuvre instead of freezing mid-junction when the light flips. At or below it,
+	 * the vehicle is queueing and holds. Stateless commitment — no per-light bookkeeping to go stale.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Signals", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float SignalCommitSpeed = 200.f;
+
+	/** How far ahead a stop-aspect signal starts being braked for. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Signals", meta = (ClampMin = "0.0", Units = "cm"))
+	float SignalDetectionRange = 3500.f;
 
 	// ---------------------------------------------------------------- Debug
 
@@ -211,4 +231,12 @@ private:
 	 * overlap enter/exit would leave a stale clearance and the wrong throttle.
 	 */
 	void UpdateTrafficClearance();
+
+	/**
+	 * Ask every registered signal whether it applies to this vehicle: hold if queueing inside a
+	 * stop-aspect zone, and feed the nearest governing stop line to PathFollow so the vehicle brakes
+	 * on approach instead of only reacting once inside. Pull rather than push — recomputed from
+	 * ground truth every tick, so no hold can go stale.
+	 */
+	void UpdateSignalAwareness();
 };

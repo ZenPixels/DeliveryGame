@@ -104,6 +104,11 @@ Content/Game/
   reparenting.
 - Tick is opt-in: debug-only actors call `SetActorTickEnabled(bDrawDebug)` in `BeginPlay` rather
   than ticking unconditionally.
+- **All traffic debug drawing is gated twice**: a per-actor `bDrawDebug` chooses *what* draws, and
+  the `dg.TrafficDebugDraw` console variable (default 1) gates whether *anything* does — `dg.
+  TrafficDebugDraw 0` silences the lot without touching instance flags. Shipping builds strip
+  `DrawDebug*` calls entirely regardless. Event logging (`LogDeliveryGame`) is controlled separately
+  by verbosity: `log LogDeliveryGame Warning` at the console, or `[Core.Log]` in an ini.
 
 ## Known issues
 
@@ -113,19 +118,17 @@ Content/Game/
 - `Content/Game/Vehicles/` duplicates much of `Content/Game/Blueprints/` (van assets, the three
   `BP_Path*` actors, an orphaned `BP_AI_Car_Base`). Audio is triplicated: `Car_Thump` exists in
   `SFX/`, `Vehicle_Jeep/Sounds/`, and `Vehicle_Base/Collisions/`.
-- **`Content/Game/Vehicles/Sedan/BP_Sedan` does not compile** — its parent class
-  `/Script/ArcadeVehicleSystem.StaticVehicleExample` comes from a plugin that is not installed, so
-  the asset has a NULL parent. It is the only failing Blueprint in the project (352 of 353 compile
-  clean) and it sits in the stale `Vehicles/` tree, so deleting that tree resolves it.
-  Assets also reference a missing `/Script/Narrative` package.
-
-  Verify with:
+- ~~`BP_Sedan` does not compile~~ — **deleted 2026-08-09** (it was a test riding on the uninstalled
+  `ArcadeVehicleSystem` plugin; nothing live referenced it). All Blueprints now compile. Verify with:
   ```powershell
   & "C:\Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
     "F:\Projects\DeliveryGame\DeliveryGame.uproject" -run=CompileAllBlueprints -unattended -nopause
   ```
-  Note this commandlet exits **1** if any Blueprint fails, so a non-zero exit is expected until
-  `BP_Sedan` is gone. Do **not** use `-nullrhi` with plain editor mode for headless checks — the
-  editor world hits a `TNotNull` fatal error on startup under a null RHI. Use a commandlet instead.
+  Two traps with this commandlet: its exit code counts **any error logged during the run**, not just
+  Blueprint failures — a stale ini value once produced exit 1 with every Blueprint passing (read the
+  `Compiling Completed with N errors` line, not just the exit code). And do **not** use `-nullrhi`
+  with plain editor mode for headless checks — the editor world hits a `TNotNull` fatal error under
+  a null RHI. Use a commandlet instead.
+  Some assets still reference a missing `/Script/Narrative` package (load warning only).
 - `*_BuiltData.uasset` is gitignored yet `Island_BuiltData` and `Test_BuiltData` are tracked.
 - No `.gitattributes` or LFS despite a repo full of binary `.uasset` files.

@@ -6,8 +6,7 @@
 #include "Components/SceneComponent.h"
 #include "DeliveryGame.h"
 #include "DrawDebugHelpers.h"
-#include "Traffic/DGAIVehiclePawn.h"
-#include "Traffic/DGPathFollowComponent.h"
+#include "Traffic/DGTrafficSubsystem.h"
 
 namespace
 {
@@ -52,7 +51,7 @@ void ADGTrafficLightActor::ResolveComponents()
 	if (!SignalBox)
 	{
 		UE_LOG(LogDeliveryGame, Warning,
-			TEXT("%s has no Box Component, so it cannot hold anything. Add one to this Blueprint."),
+			TEXT("%s has no Box Component, so it cannot stop anything. Add one to this Blueprint."),
 			*GetName());
 	}
 
@@ -61,13 +60,6 @@ void ADGTrafficLightActor::ResolveComponents()
 	RedLight = FindComponentByNameFragments(*this, {TEXT("RedLight"), TEXT("Red Light"), TEXT("Red")});
 	YellowLight = FindComponentByNameFragments(*this, {TEXT("Yelllow"), TEXT("Yellow")});
 	GreenLight = FindComponentByNameFragments(*this, {TEXT("GreenLight"), TEXT("Green Light"), TEXT("Green")});
-
-	if (!RedLight && !YellowLight && !GreenLight)
-	{
-		UE_LOG(LogDeliveryGame, Verbose,
-			TEXT("%s found no lamp components; the signal will still gate traffic but show nothing."),
-			*GetName());
-	}
 }
 
 void ADGTrafficLightActor::BeginPlay()
@@ -84,33 +76,115 @@ void ADGTrafficLightActor::BeginPlay()
 
 	if (SignalBox)
 	{
-		// The Blueprint toggled bGenerateOverlapEvents to gate the zone. Leave events on permanently
-		// and decide in the handler instead: toggling them off loses the end-overlap that would
-		// release a waiting vehicle.
+		// Queries only. No overlap delegates are bound: vehicles poll IsActorInZone instead, so there
+		// is no enter/exit event whose loss could strand a vehicle.
 		SignalBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		SignalBox->SetCollisionResponseToAllChannels(ECR_Overlap);
 		SignalBox->SetGenerateOverlapEvents(true);
-		SignalBox->OnComponentBeginOverlap.AddDynamic(this, &ADGTrafficLightActor::OnSignalBoxBeginOverlap);
-		SignalBox->OnComponentEndOverlap.AddDynamic(this, &ADGTrafficLightActor::OnSignalBoxEndOverlap);
-
-		// Catch vehicles already inside the volume at level start, which fire no begin-overlap.
-		if (IsStopAspect())
-		{
-			HoldAllInVolume();
-		}
 	}
-	else
+
+	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)
 	{
-		SetActorTickEnabled(false);
+		Traffic->RegisterLight(this);
 	}
 }
 
 void ADGTrafficLightActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// Never leave a vehicle holding for a signal that no longer exists.
-	ReleaseAll();
+	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)
+	{
+		Traffic->UnregisterLight(this);
+	}
 
 	Super::EndPlay(EndPlayReason);
+}
+
+bool ADGTrafficLightActor::IsActorInZone(const AActor* Actor) const
+{
+	if (!Actor || !SignalBox)
+	{
+		return false;
+	}
+
+	// Horizontal footprint test in the volume's own space; the vertical axis is checked separately
+	// and generously. The authored zones float ~2 m above the road, so a strict point-in-box test
+	// misses every vehicle — their origins sit at axle height, below the box.
+	const FVector Local = SignalBox->GetComponentTransform().InverseTransformPosition(Actor->GetActorLocation());
+	const FVector Extent = SignalBox->GetUnscaledBoxExtent();
+
+	if (FMath::Abs(Local.X) > Extent.X || FMath::Abs(Local.Y) > Extent.Y)
+	{
+		return false;
+	}
+
+	// Same road level? Generous enough for kerbs and suspension, tight enough that a future overpass
+	// on the city map is not governed by the signal underneath it.
+	const float VerticalGap = FMath::Abs(Actor->GetActorLocation().Z - SignalBox->GetComponentLocation().Z);
+	return VerticalGap <= SignalBox->GetScaledBoxExtent().Z + 300.f;
+}
+
+float ADGTrafficLightActor::GetStopLineDistance(const FVector& From, const FVector& Forward) const
+{
+	if (!SignalBox)
+	{
+		return -1.f;
+	}
+
+	// Vertical gate first — a signal on another road level must not brake us.
+	if (FMath::Abs(From.Z - SignalBox->GetComponentLocation().Z) > SignalBox->GetScaledBoxExtent().Z + 300.f)
+	{
+		return -1.f;
+	}
+
+	// 2D ray-vs-box in the volume's local space: does the vehicle's forward line actually enter this
+	// zone? This is the lane filter — the opposite lane's pad and the cross street's pads sit off our
+	// line and return a miss, so only the signal governing our own approach ever brakes us.
+	const FTransform& BoxTransform = SignalBox->GetComponentTransform();
+	const FVector LocalFrom = BoxTransform.InverseTransformPosition(From);
+	FVector LocalDir = BoxTransform.InverseTransformVector(Forward);
+	LocalDir.Z = 0.f;
+	if (!LocalDir.Normalize())
+	{
+		return -1.f;
+	}
+
+	const FVector Extent = SignalBox->GetUnscaledBoxExtent();
+	float TMin = 0.f;
+	float TMax = TNumericLimits<float>::Max();
+
+	for (int32 Axis = 0; Axis < 2; ++Axis)
+	{
+		const float Origin = (Axis == 0) ? LocalFrom.X : LocalFrom.Y;
+		const float Dir = (Axis == 0) ? LocalDir.X : LocalDir.Y;
+		const float E = (Axis == 0) ? Extent.X : Extent.Y;
+
+		if (FMath::Abs(Dir) < KINDA_SMALL_NUMBER)
+		{
+			if (FMath::Abs(Origin) > E)
+			{
+				return -1.f; // travelling parallel to this slab, outside it
+			}
+			continue;
+		}
+
+		float T0 = (-E - Origin) / Dir;
+		float T1 = (E - Origin) / Dir;
+		if (T0 > T1)
+		{
+			Swap(T0, T1);
+		}
+
+		TMin = FMath::Max(TMin, T0);
+		TMax = FMath::Min(TMax, T1);
+		if (TMin > TMax)
+		{
+			return -1.f;
+		}
+	}
+
+	// Local distances are distorted by the box's non-uniform scale, so convert through world space.
+	const FVector WorldHit = BoxTransform.TransformPosition(LocalFrom + LocalDir * TMin);
+	return FVector::DotProduct(WorldHit - From, Forward);
 }
 
 void ADGTrafficLightActor::UpdateLampVisibility()
@@ -139,58 +213,6 @@ float ADGTrafficLightActor::GetCurrentStateDuration() const
 	}
 }
 
-void ADGTrafficLightActor::ApplyHold(ADGAIVehiclePawn* Vehicle, bool bHold)
-{
-	if (!Vehicle || !Vehicle->PathFollow)
-	{
-		return;
-	}
-
-	Vehicle->PathFollow->SetSignalHold(bHold);
-
-	if (bHold)
-	{
-		HeldVehicles.Add(Vehicle);
-	}
-	else
-	{
-		HeldVehicles.Remove(Vehicle);
-	}
-}
-
-void ADGTrafficLightActor::HoldAllInVolume()
-{
-	if (!SignalBox)
-	{
-		return;
-	}
-
-	TArray<AActor*> Overlapping;
-	SignalBox->GetOverlappingActors(Overlapping, ADGAIVehiclePawn::StaticClass());
-	for (AActor* Other : Overlapping)
-	{
-		// Any AI vehicle, not just vans. The Blueprint cast to BP_AI_Van specifically, so the school
-		// bus drove straight through every red light.
-		ApplyHold(Cast<ADGAIVehiclePawn>(Other), true);
-	}
-}
-
-void ADGTrafficLightActor::ReleaseAll()
-{
-	for (const TWeakObjectPtr<ADGAIVehiclePawn>& Weak : HeldVehicles)
-	{
-		if (ADGAIVehiclePawn* Vehicle = Weak.Get())
-		{
-			if (Vehicle->PathFollow)
-			{
-				Vehicle->PathFollow->SetSignalHold(false);
-			}
-		}
-	}
-
-	HeldVehicles.Reset();
-}
-
 void ADGTrafficLightActor::SetSignalState(EDGSignalState NewState)
 {
 	if (SignalState == NewState)
@@ -201,16 +223,8 @@ void ADGTrafficLightActor::SetSignalState(EDGSignalState NewState)
 	SignalState = NewState;
 	TimeInState = 0.f;
 
+	// Nothing to hold or release: vehicles read the aspect themselves on their next update.
 	UpdateLampVisibility();
-
-	if (IsStopAspect())
-	{
-		HoldAllInVolume();
-	}
-	else
-	{
-		ReleaseAll();
-	}
 }
 
 void ADGTrafficLightActor::AdvanceSignalState()
@@ -221,27 +235,6 @@ void ADGTrafficLightActor::AdvanceSignalState()
 	case EDGSignalState::Yellow: SetSignalState(EDGSignalState::Red);    break;
 	default:                     SetSignalState(EDGSignalState::Green);  break;
 	}
-}
-
-void ADGTrafficLightActor::OnSignalBoxBeginOverlap(
-	UPrimitiveComponent* /*OverlappedComponent*/, AActor* OtherActor, UPrimitiveComponent* /*OtherComp*/,
-	int32 /*OtherBodyIndex*/, bool /*bFromSweep*/, const FHitResult& /*SweepResult*/)
-{
-	if (!IsStopAspect())
-	{
-		return;
-	}
-
-	ApplyHold(Cast<ADGAIVehiclePawn>(OtherActor), true);
-}
-
-void ADGTrafficLightActor::OnSignalBoxEndOverlap(
-	UPrimitiveComponent* /*OverlappedComponent*/, AActor* OtherActor, UPrimitiveComponent* /*OtherComp*/,
-	int32 /*OtherBodyIndex*/)
-{
-	// Release on exit whatever the aspect: a vehicle outside the volume is no longer this signal's
-	// concern, and leaving the flag set would strand it permanently.
-	ApplyHold(Cast<ADGAIVehiclePawn>(OtherActor), false);
 }
 
 void ADGTrafficLightActor::Tick(float DeltaSeconds)
@@ -264,7 +257,7 @@ void ADGTrafficLightActor::Tick(float DeltaSeconds)
 		}
 	}
 
-	if (bDrawDebug && SignalBox)
+	if (bDrawDebug && SignalBox && CVarDGTrafficDebugDraw.GetValueOnGameThread())
 	{
 		const FColor Color = (SignalState == EDGSignalState::Green) ? FColor::Green
 			: (SignalState == EDGSignalState::Yellow) ? FColor::Yellow
@@ -278,8 +271,7 @@ void ADGTrafficLightActor::Tick(float DeltaSeconds)
 			: TEXT("RED");
 
 		DrawDebugString(GetWorld(), GetActorLocation() + FVector(0.f, 0.f, 250.f),
-			FString::Printf(TEXT("%s %.1fs | holding %d"), StateName,
-				GetCurrentStateDuration() - TimeInState, HeldVehicles.Num()),
+			FString::Printf(TEXT("%s %.1fs"), StateName, GetCurrentStateDuration() - TimeInState),
 			nullptr, Color, 0.f, true, 1.2f);
 	}
 }

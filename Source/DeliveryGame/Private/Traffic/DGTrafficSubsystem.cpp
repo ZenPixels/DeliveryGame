@@ -4,6 +4,7 @@
 
 #include "DeliveryGame.h"
 #include "Traffic/DGPathActor.h"
+#include "Traffic/DGTrafficLightActor.h"
 
 void UDGTrafficSubsystem::RegisterPath(ADGPathActor* Path)
 {
@@ -52,6 +53,33 @@ ADGPathActor* UDGTrafficSubsystem::FindNearestPath(const FVector& WorldLocation,
 	}
 
 	return Best;
+}
+
+void UDGTrafficSubsystem::RegisterLight(ADGTrafficLightActor* Light)
+{
+	if (Light)
+	{
+		RegisteredLights.AddUnique(Light);
+	}
+}
+
+void UDGTrafficSubsystem::UnregisterLight(ADGTrafficLightActor* Light)
+{
+	RegisteredLights.RemoveSingleSwap(Light);
+}
+
+TArray<ADGTrafficLightActor*> UDGTrafficSubsystem::GetRegisteredLights() const
+{
+	TArray<ADGTrafficLightActor*> Result;
+	Result.Reserve(RegisteredLights.Num());
+	for (const TObjectPtr<ADGTrafficLightActor>& Light : RegisteredLights)
+	{
+		if (Light)
+		{
+			Result.Add(Light);
+		}
+	}
+	return Result;
 }
 
 TArray<ADGPathActor*> UDGTrafficSubsystem::GetRegisteredPaths() const

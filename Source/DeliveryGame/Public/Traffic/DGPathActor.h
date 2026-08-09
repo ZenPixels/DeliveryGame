@@ -40,6 +40,22 @@ public:
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Path")
 	TArray<TObjectPtr<ADGPathActor>> NextPaths;
 
+	/**
+	 * Optional authored route, in actor-local space. When it has 2+ points the spline is rebuilt from
+	 * them on construction; empty leaves whatever spline the actor already owns untouched, so every
+	 * hand-authored road keeps working.
+	 *
+	 * This exists so road networks can be laid out programmatically (over MCP: spawn a BP_Path, set
+	 * the actor transform and this array) instead of hand-editing spline handles — the editor
+	 * tooling cannot write spline curve data into a placed instance reliably, but it can write this.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path", meta = (MakeEditWidget))
+	TArray<FVector> RoutePoints;
+
+	/** Close the rebuilt route into a loop. Only consulted when RoutePoints is in use. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path")
+	bool bClosedLoopRoute = false;
+
 	/** Per-path throttle cap for vehicles on this route. 0 means "use the vehicle's own MaxThrottle". */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ThrottleOverride = 0.f;
@@ -96,6 +112,7 @@ public:
 	ADGPathActor* ChooseNextPath() const;
 
 protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;

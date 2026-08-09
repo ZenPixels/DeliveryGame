@@ -9,6 +9,25 @@
 class ADGPathActor;
 class UChaosWheeledVehicleMovementComponent;
 
+/** How the vehicle is propelled along its route. */
+UENUM(BlueprintType)
+enum class EDGPathFollowMoveMode : uint8
+{
+	/**
+	 * Drive the Chaos vehicle through throttle/brake/steering inputs. Physically honest, but every
+	 * behaviour is a negotiation with the drivetrain — gears, brake authority, understeer.
+	 */
+	Physics,
+
+	/**
+	 * Move the pawn directly: speed is integrated, heading turns toward the goal at a capped rate,
+	 * and the transform is set each tick. Corners are taken at exactly the chosen speed, launches
+	 * cannot fail, kerbs cannot be jumped. The arcade choice for ambient traffic (author decision,
+	 * 2026-08-09) — physics-on-impact for player collisions is a planned later layer.
+	 */
+	Kinematic,
+};
+
 /**
  * Drives a Chaos wheeled vehicle along an ADGPathActor spline.
  *
@@ -27,6 +46,35 @@ class DELIVERYGAME_API UDGPathFollowComponent : public UActorComponent
 
 public:
 	UDGPathFollowComponent();
+
+	// ------------------------------------------------------------- Movement
+
+	/** How this vehicle is propelled. Kinematic for ambient traffic; Physics kept as an A/B fallback. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Movement")
+	EDGPathFollowMoveMode MoveMode = EDGPathFollowMoveMode::Kinematic;
+
+	/** Kinematic acceleration. Plain numbers instead of torque curves — tune for feel, not realism. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Movement", meta = (ClampMin = "1.0"))
+	float KinematicAcceleration = 700.f;
+
+	/** Kinematic braking deceleration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Movement", meta = (ClampMin = "1.0"))
+	float KinematicBraking = 1200.f;
+
+	/** Fastest the heading may swing toward the goal. Higher = tighter, more arcade cornering. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Movement", meta = (ClampMin = "1.0", Units = "deg"))
+	float KinematicYawRate = 120.f;
+
+	/** Current kinematic speed along the vehicle's heading. */
+	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|Movement")
+	float KinematicSpeed = 0.f;
+
+	/**
+	 * Speed this vehicle is actually doing, in cm/s, whichever mode is driving it. Use this instead
+	 * of the actor/Chaos velocity: a kinematically-moved pawn reports zero physics velocity.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Path Follow")
+	float GetVehicleSpeed() const;
 
 	// ---------------------------------------------------------------- Path
 
@@ -57,24 +105,27 @@ public:
 	float ResumeRetryInterval = 1.5f;
 
 	// -------------------------------------------------------------- Recovery
-
-	/**
-	 * Place the vehicle back on its lane if it has been immobile off-route for StuckTimeout.
-	 *
-	 * Steering back is always attempted first and usually works. This is the last resort for a vehicle
-	 * beached on terrain or jammed against geometry, where no steering input can free it. Ambient
-	 * traffic silently rejoining is far less noticeable than a van parked in a field forever.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Recovery")
-	bool bRecoverByTeleport = true;
+	//
+	// A stuck vehicle is never teleported (author's call): the aim point already sits on its lane,
+	// so any vehicle that *can* move is always steering back toward it. One that genuinely cannot
+	// move stops, waits StuckRetryDelay, then tries again — the honest behaviour until reverse
+	// logic exists.
 
 	/** Speed below which the vehicle counts as immobile. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Recovery", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float StuckSpeedThreshold = 40.f;
 
-	/** Seconds of trying to move without moving before recovery fires. */
+	/** Seconds of trying to move without moving before the vehicle gives up and parks. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Recovery", meta = (ClampMin = "0.5", Units = "s"))
 	float StuckTimeout = 5.f;
+
+	/**
+	 * How long a stuck-stopped vehicle waits before auto-resume may try driving again. Long enough
+	 * that a wedged vehicle is not constantly revving at the obstacle, short enough that it frees
+	 * itself soon after whatever pinned it moves away.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Recovery", meta = (ClampMin = "0.0", Units = "s"))
+	float StuckRetryDelay = 10.f;
 
 	/** Seconds the vehicle has been immobile while trying to move. Diagnostic. */
 	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|Recovery")
@@ -97,7 +148,7 @@ public:
 	 * wide, because the aim point sits well past the corner and the vehicle cuts straight for it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Steering", meta = (ClampMin = "50.0", Units = "cm"))
-	float MinAimDistance = 220.f;
+	float MinAimDistance = 350.f;
 
 	/**
 	 * Look-ahead expressed as travel time, added to MinAimDistance and capped by ForwardAimDistance.
@@ -107,14 +158,9 @@ public:
 	float AimTimeAhead = 0.55f;
 
 	/**
-	 * Sideways offset of the aim point from the spline, along the path's right vector. Negative
-	 * aims left.
+	 * Sideways offset of the aim point from the spline, along the route's right vector in the
+	 * direction of travel. Negative aims left.
 	 *
-	 * The original steered from a marker ~255 cm to one side of the vehicle, which held the spline
-	 * off-centre rather than centred. Pure pursuit aims at the spline itself, so set this if the
-	 * splines mark a road edge or lane boundary rather than the driving line.
-	 */
-	/**
 	 * 254.89 is the offset recovered from BP_AI_Vehicle_Base's old "Route Collider" marker, i.e. half
 	 * a lane width on the Island roads.
 	 *
@@ -148,9 +194,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Steering", meta = (ClampMin = "0.0", ClampMax = "3.0"))
 	float LaneDampingGain = 0.7f;
 
-	/** Cap on the lane-correction shift, so a badly displaced vehicle cannot aim absurdly wide. */
+	/**
+	 * Cap on the lane-correction shift. Kept moderate deliberately: the goal should always look like
+	 * a point on the road — at 800 a badly displaced vehicle aimed up to 10 m sideways, which read as
+	 * "the goal is nowhere near the lane". Pure pursuit still converges from a wide cap's worth away.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Steering", meta = (ClampMin = "0.0", Units = "cm"))
-	float MaxLaneCorrection = 800.f;
+	float MaxLaneCorrection = 400.f;
 
 	/** Signed lateral position relative to the route: positive is right of it. Diagnostic. */
 	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|State")
@@ -206,11 +256,12 @@ public:
 
 	/** Heading change over the lookahead at which cornering slowdown is fully applied. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Throttle", meta = (ClampMin = "1.0", ClampMax = "180.0", Units = "deg"))
-	float CornerFullSlowAngle = 55.f;
+	float CornerFullSlowAngle = 50.f;
 
-	/** Fraction of the speed limit still permitted in the tightest corner. */
+	/** Fraction of the speed limit still permitted in the tightest corner. 0.25 of 25 mph is ~6 mph —
+	 * the bus jumped the kerb at the previous 0.35. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Throttle", meta = (ClampMin = "0.05", ClampMax = "1.0"))
-	float MinCornerSpeedScale = 0.35f;
+	float MinCornerSpeedScale = 0.25f;
 
 	/** Brake applied while blocked or stopped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Throttle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -242,6 +293,10 @@ public:
 	/** Clearance ahead at or below which the vehicle comes to a stop. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Following", meta = (ClampMin = "0.0", Units = "cm"))
 	float MinFollowDistance = 300.f;
+
+	/** How far short of a signal's stop line the vehicle halts and waits. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Following", meta = (ClampMin = "0.0", Units = "cm"))
+	float SignalStopMargin = 150.f;
 
 	// --------------------------------------------------------- Performance
 
@@ -286,6 +341,19 @@ public:
 	/** Distance from the end of an open route at which the next path is claimed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Performance", meta = (ClampMin = "1.0", Units = "cm"))
 	float PathEndTolerance = 300.f;
+
+	/**
+	 * Distance from the end of the route at which the *next* route is decided, well before the
+	 * handoff happens. Deciding early is what lets corner anticipation see across the junction:
+	 * without it the current road looks straight right up to its end, the vehicle arrives at full
+	 * cruise, and only discovers the turn after the goal has already jumped — too late to slow down.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Performance", meta = (ClampMin = "0.0", Units = "cm"))
+	float JunctionPlanDistance = 2500.f;
+
+	/** The route already chosen for the next junction, decided JunctionPlanDistance before the end. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Path Follow|State")
+	TObjectPtr<ADGPathActor> PlannedNextPath;
 
 	/**
 	 * How far from the end of a finished route to look for a continuation when the path has no
@@ -371,6 +439,14 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|State")
 	float TrafficClosingSpeed = 0.f;
 
+	/**
+	 * Distance to the stop line of the nearest signal showing a stop aspect on this vehicle's line,
+	 * pushed by the owning pawn each tick. Large means none. Separate channel from TrafficClearance:
+	 * a queue approaching a red is constrained by the car ahead *and* the line at once.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|State")
+	float SignalStopDistance = 1000000.f;
+
 	/** On by default because BP_AI_Vehicle_Base's template had Draw Debug enabled. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Debug")
 	bool bDrawDebug = true;
@@ -394,6 +470,19 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Path Follow")
 	void SetTrafficAhead(float DistanceCm, float ClosingSpeed);
+
+	/** Report the nearest governing stop line ahead. Pass a large value to mean "none". */
+	UFUNCTION(BlueprintCallable, Category = "Path Follow")
+	void SetSignalStopAhead(float DistanceCm);
+
+	/**
+	 * Brake demand from the stop line ahead, 0 to 1. Full once at the line, else the deceleration
+	 * needed to stop by it against ComfortableDeceleration — same physics as GetFollowBrake, but
+	 * against a stationary target, so vehicles ease down for a red instead of ignoring it until
+	 * they are inside the zone.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Path Follow")
+	float GetSignalBrake() const;
 
 	/**
 	 * Brake demand from the obstacle ahead, 0 to 1, from the deceleration needed to avoid it.
@@ -450,6 +539,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Path Follow")
 	ADGPathActor* GetCurrentPath() const { return TargetSpline; }
 
+	/**
+	 * Seconds since this vehicle last changed routes. ADGPathDeciderActor uses it to avoid handing a
+	 * second decision to a vehicle that just committed to one — a junction's decision box and the
+	 * planned handoff both fire in the same few metres, and re-deciding mid-crossing yanks the goal
+	 * sideways at the worst possible moment.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Path Follow")
+	float GetTimeSinceLastPathChange() const;
+
 	/** True if Path runs the same way the vehicle is currently facing. */
 	bool IsPathAligned(const ADGPathActor* Path) const;
 
@@ -470,6 +568,9 @@ protected:
 	/** Apply steering / throttle / brake to the movement component for this frame. */
 	void ProceedToDestination(float DeltaTime);
 
+	/** Kinematic counterpart: integrate speed, swing heading toward the goal, set the transform. */
+	void ProceedKinematic(float DeltaTime);
+
 	/** Claim a continuation route at the end of an open spline. Stops the vehicle at a dead end. */
 	void AdvanceToNextPath();
 
@@ -486,11 +587,8 @@ protected:
 	 */
 	bool ReacquireNearestPath();
 
-	/** Track immobility and, past StuckTimeout, recover the vehicle onto its lane. */
+	/** Track immobility and, past StuckTimeout, park the vehicle until StuckRetryDelay elapses. */
 	void UpdateStuckRecovery(float DeltaTime);
-
-	/** Place the vehicle on its lane position facing along the route. Returns false if impossible. */
-	bool SnapToLane();
 
 	void DrawDebugVisuals() const;
 
@@ -510,6 +608,12 @@ private:
 
 	/** Counts up to ResumeRetryInterval while stopped. */
 	float TimeSinceResumeAttempt = 0.f;
+
+	/** World time of the last SetPath, for GetTimeSinceLastPathChange. */
+	float LastPathChangeTime = -1000.f;
+
+	/** Cut throttle/brake and hold with the handbrake once effectively stationary. */
+	void ApplyHoldOutputs(UChaosWheeledVehicleMovementComponent& Movement) const;
 
 	mutable TWeakObjectPtr<UChaosWheeledVehicleMovementComponent> CachedMovement;
 };

@@ -627,6 +627,28 @@ bool UDGPathFollowComponent::IsPathUsable(const ADGPathActor* Path) const
 	return bAllowReverseTravel || IsPathAligned(Path);
 }
 
+bool UDGPathFollowComponent::WouldEnterBackwards(const ADGPathActor* Path, const FVector& From, const FVector& Forward) const
+{
+	const USplineComponent* Spline = Path ? Path->GetRouteSpline() : nullptr;
+	if (!Spline)
+	{
+		return false;
+	}
+
+	const float Length = Spline->GetSplineLength();
+	const FVector StartPoint = Spline->GetLocationAtDistanceAlongSpline(0.f, ESplineCoordinateSpace::World);
+	const FVector EndPoint = Spline->GetLocationAtDistanceAlongSpline(Length, ESplineCoordinateSpace::World);
+	const bool bEnterAtStart = FVector::DistSquared(From, StartPoint) <= FVector::DistSquared(From, EndPoint);
+
+	// Direction of travel entering at the nearest terminus, heading into the route.
+	const float EntryDistance = bEnterAtStart ? 0.f : Length;
+	const FVector InwardDir =
+		(Spline->GetDirectionAtDistanceAlongSpline(EntryDistance, ESplineCoordinateSpace::World)
+			* (bEnterAtStart ? 1.f : -1.f)).GetSafeNormal2D();
+
+	return FVector::DotProduct(InwardDir, Forward.GetSafeNormal2D()) < -0.5f;
+}
+
 ADGPathActor* UDGPathFollowComponent::FindContinuationPath() const
 {
 	const UWorld* World = GetWorld();
@@ -657,7 +679,15 @@ ADGPathActor* UDGPathFollowComponent::FindContinuationPath() const
 	// Random among every road connecting at this junction, not nearest-wins. Since routes are planned
 	// ahead of the decider boxes now, this *is* the junction decision for most vehicles — nearest-wins
 	// here would send every vehicle round the same deterministic loop forever.
+	//
+	// U-turns are banned as a route choice: entering a road backwards relative to our travel is only
+	// permitted when it is the *only* option (a genuine dead end), where turning back beats parking.
+	const FVector ArrivalHeading =
+		(Spline->GetDirectionAtDistanceAlongSpline(ArrivalDistance, ESplineCoordinateSpace::World)
+			* TravelDirection).GetSafeNormal2D();
+
 	TArray<ADGPathActor*> Candidates;
+	TArray<ADGPathActor*> UTurnFallbacks;
 	for (ADGPathActor* Candidate : Traffic->GetRegisteredPaths())
 	{
 		if (!Candidate || Candidate == TargetSpline || !IsPathUsable(Candidate))
@@ -667,8 +697,20 @@ ADGPathActor* UDGPathFollowComponent::FindContinuationPath() const
 
 		if (Candidate->GetDistanceSquaredTo(EndLocation) <= RadiusSq)
 		{
-			Candidates.Add(Candidate);
+			if (WouldEnterBackwards(Candidate, EndLocation, ArrivalHeading))
+			{
+				UTurnFallbacks.Add(Candidate);
+			}
+			else
+			{
+				Candidates.Add(Candidate);
+			}
 		}
+	}
+
+	if (Candidates.IsEmpty())
+	{
+		Candidates = UTurnFallbacks; // dead end: turning back beats parking forever
 	}
 
 	return Candidates.IsEmpty() ? nullptr : Candidates[FMath::RandHelper(Candidates.Num())];
@@ -720,7 +762,8 @@ void UDGPathFollowComponent::UpdateStuckRecovery(float DeltaTime)
 	// the park/retry cadence phased against the light cycle and could miss green indefinitely.
 	// Stuck detection is only for UNEXPLAINED immobility: throttle on, road clear, not moving.
 	const bool bWaitingWithReason =
-		bHeldBySignal || bBlockedAhead || GetFollowBrake() >= 0.5f || GetSignalBrake() >= 0.5f;
+		bHeldBySignal || bBlockedAhead || GetFollowBrake() >= 0.5f || GetSignalBrake() >= 0.5f ||
+		GetFollowThrottleScale() <= 0.f; // queued at the gap floor is a reason too
 
 	if (!bIsMoving || bWaitingWithReason || Speed > StuckSpeedThreshold)
 	{

@@ -109,10 +109,14 @@ ADGPathActor* ADGPathDeciderActor::ChoosePathFor_Implementation(ADGAIVehiclePawn
 
 		// Drop only routes the vehicle genuinely cannot follow. Do NOT filter on alignment here: the
 		// splines are two-way road centre lines, so a route running against its spline direction is
-		// perfectly valid and is simply travelled in reverse.
-		Valid.RemoveAll([Vehicle](const ADGPathActor* Path)
+		// perfectly valid and is simply travelled in reverse. U-turns, however, are banned (author
+		// rule) — a decider must never send a vehicle back the way it came.
+		const FVector VehicleLocation = Vehicle->GetActorLocation();
+		const FVector VehicleForward = Vehicle->GetActorForwardVector();
+		Valid.RemoveAll([Vehicle, &VehicleLocation, &VehicleForward](const ADGPathActor* Path)
 		{
-			return !Vehicle->PathFollow->IsPathUsable(Path);
+			return !Vehicle->PathFollow->IsPathUsable(Path)
+				|| Vehicle->PathFollow->WouldEnterBackwards(Path, VehicleLocation, VehicleForward);
 		});
 	}
 

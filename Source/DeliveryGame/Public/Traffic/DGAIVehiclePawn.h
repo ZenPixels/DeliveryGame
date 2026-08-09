@@ -209,6 +209,14 @@ private:
 	/** Push the current blocker count onto the path-follow component. */
 	void SyncBlockedState();
 
+	/**
+	 * True while this vehicle is committed through a signal zone: it entered moving (or on green) and
+	 * has not yet left. A committed vehicle is immune to holds, so a light flipping mid-crossing — or
+	 * a tight turn clipping the *oncoming approach's* pad — cannot freeze it inside the junction.
+	 * Cleared the moment it is outside every signal zone.
+	 */
+	bool bSignalCommitted = false;
+
 	/** Manual holds from AddBlocker / RemoveBlocker. */
 	int32 BlockerCount = 0;
 

@@ -197,12 +197,18 @@ void ADGAIVehiclePawn::RecomputeOverlapBlockers()
 {
 	BlockingActors.Reset();
 
-	auto GatherFrom = [this](const UBoxComponent* Volume)
+	auto GatherFrom = [this](UBoxComponent* Volume)
 	{
 		if (!Volume)
 		{
 			return;
 		}
+
+		// The overlap list is a cache that only refreshes when the component moves. A stationary
+		// vehicle's cache can hold a phantom overlap indefinitely (a missed end event), which read as
+		// "something at my bumper" with the nearest vehicle 4.7 km away — frozen forever. Refresh it
+		// explicitly; this also fires any end-overlap notifies that were missed.
+		Volume->UpdateOverlaps();
 
 		TArray<AActor*> Overlapping;
 		Volume->GetOverlappingActors(Overlapping);
@@ -278,6 +284,14 @@ void ADGAIVehiclePawn::UpdateTrafficClearance()
 		}
 
 		const FVector ToOther = Other->GetActorLocation() - SelfLocation;
+
+		// Sanity cull: nothing farther than the detection volume can reach is a real overlap. Belt
+		// to the UpdateOverlaps braces above — a phantom must never freeze a vehicle again.
+		if (ToOther.SizeSquared2D() > FMath::Square(4000.f))
+		{
+			continue;
+		}
+
 		const float AlongForward = FVector::DotProduct(ToOther, Forward);
 		if (AlongForward <= 0.f)
 		{
@@ -352,25 +366,37 @@ void ADGAIVehiclePawn::UpdateSignalAwareness()
 	const float Speed = PathFollow->GetVehicleSpeed();
 
 	// Recomputed from scratch every tick. Because the answer is derived rather than remembered, a
-	// hold cannot outlive the condition that caused it.
+	// hold cannot outlive the condition that caused it. (The one piece of memory, bSignalCommitted,
+	// is cleared by ground truth: being outside every zone.)
 	bool bShouldHold = false;
+	bool bInAnyZone = false;
 	float NearestStopLine = 1000000.f;
 
 	for (const ADGTrafficLightActor* Light : Traffic->GetRegisteredLights())
 	{
-		if (!Light || !Light->IsStopAspect())
+		if (!Light)
 		{
 			continue;
 		}
 
 		if (Light->IsActorInZone(this))
 		{
-			// Crossing at speed when the aspect flipped: committed — complete the manoeuvre rather
-			// than freezing mid-junction. Only a vehicle at queueing speed holds.
-			if (Speed <= SignalCommitSpeed)
+			// Track zone membership for every aspect, so a vehicle that launches through on green is
+			// already latched as committed before the light can flip on it.
+			bInAnyZone = true;
+
+			// Only an uncommitted vehicle at queueing speed holds. A committed one — it entered
+			// moving, or slowed for its turn mid-crossing, or clipped the oncoming approach's pad —
+			// completes the manoeuvre.
+			if (Light->IsStopAspect() && !bSignalCommitted && Speed <= SignalCommitSpeed)
 			{
 				bShouldHold = true;
 			}
+			continue;
+		}
+
+		if (!Light->IsStopAspect())
+		{
 			continue;
 		}
 
@@ -381,7 +407,7 @@ void ADGAIVehiclePawn::UpdateSignalAwareness()
 		}
 
 		// Amber dilemma: if stopping from here would take more than comfortable braking, carry on —
-		// the commitment rule above covers the crossing. A red is braked for regardless.
+		// commitment covers the crossing. A red is braked for regardless.
 		if (Light->SignalState == EDGSignalState::Yellow && PathFollow->ComfortableDeceleration > 0.f)
 		{
 			const float UsableDistance = FMath::Max(Distance - 150.f, 50.f);
@@ -393,6 +419,16 @@ void ADGAIVehiclePawn::UpdateSignalAwareness()
 		}
 
 		NearestStopLine = FMath::Min(NearestStopLine, Distance);
+	}
+
+	// Latch: moving through a zone un-held means crossing. Exit clears it.
+	if (!bInAnyZone)
+	{
+		bSignalCommitted = false;
+	}
+	else if (!bShouldHold && Speed > SignalCommitSpeed)
+	{
+		bSignalCommitted = true;
 	}
 
 	PathFollow->SetSignalHold(bShouldHold);
@@ -468,11 +504,11 @@ void ADGAIVehiclePawn::Tick(float DeltaSeconds)
 
 	TimeSinceLastCrashSound += DeltaSeconds;
 
-	// The gap to a vehicle ahead changes every frame, so re-measure while anything is being tracked.
-	if (!BlockingActors.IsEmpty())
-	{
-		UpdateTrafficClearance();
-	}
+	// Rebuild the tracked set from ground truth every tick, not just on overlap events. A missed
+	// end-overlap once left a vehicle believing something was at its bumper forever — frozen 10 m
+	// off-road with nothing near it. Four vehicles querying two volumes each is trivial; a stale
+	// clearance is not.
+	RecomputeOverlapBlockers();
 
 	UpdateSignalAwareness();
 

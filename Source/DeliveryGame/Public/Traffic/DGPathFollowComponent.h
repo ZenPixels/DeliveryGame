@@ -557,6 +557,13 @@ public:
 	 */
 	bool IsPathUsable(const ADGPathActor* Path) const;
 
+	/**
+	 * True if entering Path at its nearest terminus would send the vehicle back against its own
+	 * heading — a U-turn. U-turns are banned as route choices (author rule); the only sanctioned
+	 * reversal is off-road recovery, which re-acquires by proximity and does not come through here.
+	 */
+	bool WouldEnterBackwards(const ADGPathActor* Path, const FVector& From, const FVector& Forward) const;
+
 	/** Multi-line status string for on-screen debugging. Replaces the BP_Debug_Text plumbing. */
 	UFUNCTION(BlueprintPure, Category = "Path Follow|Debug")
 	FString GetDebugStatus() const;

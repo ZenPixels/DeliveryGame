@@ -14,25 +14,33 @@ ADGPathDeciderActor::ADGPathDeciderActor()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = false;
 
-	DecisionBox = CreateDefaultSubobject<UBoxComponent>(TEXT("DecisionBox"));
-	DecisionBox->SetBoxExtent(FVector(300.f, 300.f, 200.f));
-	DecisionBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	DecisionBox->SetCollisionResponseToAllChannels(ECR_Overlap);
-	DecisionBox->SetGenerateOverlapEvents(true);
-	SetRootComponent(DecisionBox);
+	// No components created here — see the DecisionBox comment. It is resolved in BeginPlay from
+	// whatever box the Blueprint already owns.
 }
 
 void ADGPathDeciderActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	DecisionBox->OnComponentBeginOverlap.AddDynamic(this, &ADGPathDeciderActor::OnDecisionBoxBeginOverlap);
-
-	if (GatherValidTargets().IsEmpty())
+	DecisionBox = FindComponentByClass<UBoxComponent>();
+	if (DecisionBox)
 	{
-		UE_LOG(LogDeliveryGame, Warning, TEXT("%s has no valid TargetPaths; vehicles will pass through unchanged."),
+		// The Blueprint's box may not have been set up for queries, so make sure it can report
+		// overlaps rather than silently never firing.
+		DecisionBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		DecisionBox->SetCollisionResponseToAllChannels(ECR_Overlap);
+		DecisionBox->SetGenerateOverlapEvents(true);
+		DecisionBox->OnComponentBeginOverlap.AddDynamic(this, &ADGPathDeciderActor::OnDecisionBoxBeginOverlap);
+	}
+	else
+	{
+		UE_LOG(LogDeliveryGame, Warning,
+			TEXT("%s has no Box Component; it cannot reroute anything. Add one to this actor."),
 			*GetName());
 	}
+
+	// An empty TargetPaths is normal — routes are then discovered from overlaps at the moment a
+	// vehicle arrives, which is too early to check here.
 
 	SetActorTickEnabled(bDrawDebug);
 }
@@ -48,6 +56,27 @@ TArray<ADGPathActor*> ADGPathDeciderActor::GatherValidTargets() const
 			Valid.Add(Path);
 		}
 	}
+
+	if (!Valid.IsEmpty())
+	{
+		return Valid;
+	}
+
+	// Fall back to whatever routes physically pass through the volume. BP_Path_Decider worked this
+	// way, so deciders already placed in a level need no authored TargetPaths to keep functioning.
+	if (DecisionBox)
+	{
+		TArray<AActor*> Overlapping;
+		DecisionBox->GetOverlappingActors(Overlapping, ADGPathActor::StaticClass());
+		for (AActor* Overlap : Overlapping)
+		{
+			if (ADGPathActor* Path = Cast<ADGPathActor>(Overlap))
+			{
+				Valid.Add(Path);
+			}
+		}
+	}
+
 	return Valid;
 }
 
@@ -67,9 +96,26 @@ ADGPathActor* ADGPathDeciderActor::PeekNextPath() const
 	return Valid[0];
 }
 
-ADGPathActor* ADGPathDeciderActor::ChoosePathFor_Implementation(ADGAIVehiclePawn* /*Vehicle*/)
+ADGPathActor* ADGPathDeciderActor::ChoosePathFor_Implementation(ADGAIVehiclePawn* Vehicle)
 {
-	const TArray<ADGPathActor*> Valid = GatherValidTargets();
+	TArray<ADGPathActor*> Valid = GatherValidTargets();
+
+	// Never hand a vehicle the road it is already on, matching GetNextTargetSpline's
+	// RemoveItem(TargetSplines, TargetSpline). Without this, an overlap-discovered candidate set
+	// nearly always includes the current route and vehicles would keep re-picking it.
+	if (Vehicle && Vehicle->PathFollow)
+	{
+		Valid.Remove(Vehicle->PathFollow->GetCurrentPath());
+
+		// Drop only routes the vehicle genuinely cannot follow. Do NOT filter on alignment here: the
+		// splines are two-way road centre lines, so a route running against its spline direction is
+		// perfectly valid and is simply travelled in reverse.
+		Valid.RemoveAll([Vehicle](const ADGPathActor* Path)
+		{
+			return !Vehicle->PathFollow->IsPathUsable(Path);
+		});
+	}
+
 	if (Valid.IsEmpty())
 	{
 		return nullptr;

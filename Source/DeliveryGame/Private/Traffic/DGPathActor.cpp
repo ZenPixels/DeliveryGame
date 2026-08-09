@@ -3,6 +3,7 @@
 #include "Traffic/DGPathActor.h"
 
 #include "Components/SplineComponent.h"
+#include "DeliveryGame.h"
 #include "DrawDebugHelpers.h"
 #include "Traffic/DGTrafficSubsystem.h"
 
@@ -11,13 +12,65 @@ ADGPathActor::ADGPathActor()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = false;
 
-	SplinePath = CreateDefaultSubobject<USplineComponent>(TEXT("SplinePath"));
-	SetRootComponent(SplinePath);
+	// Deliberately no root component. BP_Path's own "Spline Path" component is its root, and
+	// defining a native root here displaces it, which breaks the Blueprint's component binding and
+	// leaves the construction script reading None.
+}
+
+USplineComponent* ADGPathActor::GetRouteSpline() const
+{
+	ResolveRouteSpline();
+	return RouteSpline;
+}
+
+void ADGPathActor::ResolveRouteSpline() const
+{
+	if (RouteSpline)
+	{
+		return;
+	}
+
+	// Prefer a spline that actually has a route authored on it over an empty one, so an incidental
+	// empty spline component cannot shadow the real path.
+	TArray<USplineComponent*> Splines;
+	GetComponents<USplineComponent>(Splines);
+
+	USplineComponent* Fallback = nullptr;
+	for (USplineComponent* Candidate : Splines)
+	{
+		if (!Candidate)
+		{
+			continue;
+		}
+
+		if (Candidate->GetNumberOfSplinePoints() > 1)
+		{
+			RouteSpline = Candidate;
+			return;
+		}
+
+		if (!Fallback)
+		{
+			Fallback = Candidate;
+		}
+	}
+
+	RouteSpline = Fallback;
 }
 
 void ADGPathActor::BeginPlay()
 {
 	Super::BeginPlay();
+
+	ResolveRouteSpline();
+
+	if (!RouteSpline)
+	{
+		UE_LOG(LogDeliveryGame, Warning,
+			TEXT("%s has no spline component; it will not be registered as a route. Add a Spline "
+				 "Component to this actor."), *GetName());
+		return;
+	}
 
 	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)
 	{
@@ -40,37 +93,69 @@ void ADGPathActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 float ADGPathActor::GetSplineLength() const
 {
-	return SplinePath ? SplinePath->GetSplineLength() : 0.f;
+	const USplineComponent* Spline = GetRouteSpline();
+	return Spline ? Spline->GetSplineLength() : 0.f;
 }
 
 bool ADGPathActor::IsClosedLoop() const
 {
-	return SplinePath && SplinePath->IsClosedLoop();
+	const USplineComponent* Spline = GetRouteSpline();
+	return Spline && Spline->IsClosedLoop();
 }
 
 void ADGPathActor::GetClosestPoint(const FVector& WorldLocation, FVector& OutLocation, float& OutDistanceAlongSpline) const
 {
-	if (!SplinePath)
+	const USplineComponent* Spline = GetRouteSpline();
+	if (!Spline)
 	{
 		OutLocation = WorldLocation;
 		OutDistanceAlongSpline = 0.f;
 		return;
 	}
 
-	const float InputKey = SplinePath->FindInputKeyClosestToWorldLocation(WorldLocation);
-	OutDistanceAlongSpline = SplinePath->GetDistanceAlongSplineAtSplineInputKey(InputKey);
-	OutLocation = SplinePath->FindLocationClosestToWorldLocation(WorldLocation, ESplineCoordinateSpace::World);
+	const float InputKey = Spline->FindInputKeyClosestToWorldLocation(WorldLocation);
+	OutDistanceAlongSpline = Spline->GetDistanceAlongSplineAtSplineInputKey(InputKey);
+	OutLocation = Spline->FindLocationClosestToWorldLocation(WorldLocation, ESplineCoordinateSpace::World);
 }
 
 double ADGPathActor::GetDistanceSquaredTo(const FVector& WorldLocation) const
 {
-	if (!SplinePath)
+	const USplineComponent* Spline = GetRouteSpline();
+	if (!Spline)
 	{
 		return TNumericLimits<double>::Max();
 	}
 
-	const FVector Closest = SplinePath->FindLocationClosestToWorldLocation(WorldLocation, ESplineCoordinateSpace::World);
+	const FVector Closest = Spline->FindLocationClosestToWorldLocation(WorldLocation, ESplineCoordinateSpace::World);
 	return FVector::DistSquared(Closest, WorldLocation);
+}
+
+float ADGPathActor::GetAlignmentWith(const FVector& WorldLocation, const FVector& Forward) const
+{
+	const USplineComponent* Spline = GetRouteSpline();
+	if (!Spline)
+	{
+		return 0.f;
+	}
+
+	const float InputKey = Spline->FindInputKeyClosestToWorldLocation(WorldLocation);
+	const float Distance = Spline->GetDistanceAlongSplineAtSplineInputKey(InputKey);
+	const FVector Direction = Spline->GetDirectionAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World);
+
+	// Flattened to 2D so a sloped road does not weaken the comparison.
+	return FVector::DotProduct(Direction.GetSafeNormal2D(), Forward.GetSafeNormal2D());
+}
+
+FVector ADGPathActor::GetEndLocation() const
+{
+	const USplineComponent* Spline = GetRouteSpline();
+	if (!Spline)
+	{
+		return GetActorLocation();
+	}
+
+	const float Distance = Spline->IsClosedLoop() ? 0.f : Spline->GetSplineLength();
+	return Spline->GetLocationAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World);
 }
 
 ADGPathActor* ADGPathActor::ChooseNextPath() const
@@ -98,31 +183,32 @@ void ADGPathActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!bDrawDebug || !SplinePath)
+	const USplineComponent* Spline = GetRouteSpline();
+	if (!bDrawDebug || !Spline)
 	{
 		return;
 	}
 
-	const int32 NumPoints = SplinePath->GetNumberOfSplinePoints();
-	const float Length = SplinePath->GetSplineLength();
+	const int32 NumPoints = Spline->GetNumberOfSplinePoints();
+	const float Length = Spline->GetSplineLength();
 	const int32 NumSegments = FMath::Max(NumPoints * 4, 8);
 
-	FVector Previous = SplinePath->GetLocationAtDistanceAlongSpline(0.f, ESplineCoordinateSpace::World);
+	FVector Previous = Spline->GetLocationAtDistanceAlongSpline(0.f, ESplineCoordinateSpace::World);
 	for (int32 i = 1; i <= NumSegments; ++i)
 	{
 		const float Distance = (Length * i) / NumSegments;
-		const FVector Current = SplinePath->GetLocationAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World);
+		const FVector Current = Spline->GetLocationAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World);
 		DrawDebugLine(GetWorld(), Previous, Current, FColor::Green, false, -1.f, 0, 4.f);
 		Previous = Current;
 	}
 
 	// Link lines to continuation routes, so junction wiring is visible at a glance.
-	const FVector End = SplinePath->GetLocationAtDistanceAlongSpline(Length, ESplineCoordinateSpace::World);
+	const FVector End = Spline->GetLocationAtDistanceAlongSpline(Length, ESplineCoordinateSpace::World);
 	for (const TObjectPtr<ADGPathActor>& Next : NextPaths)
 	{
-		if (Next && Next->SplinePath)
+		if (const USplineComponent* NextSpline = Next ? Next->GetRouteSpline() : nullptr)
 		{
-			const FVector NextStart = Next->SplinePath->GetLocationAtDistanceAlongSpline(0.f, ESplineCoordinateSpace::World);
+			const FVector NextStart = NextSpline->GetLocationAtDistanceAlongSpline(0.f, ESplineCoordinateSpace::World);
 			DrawDebugDirectionalArrow(GetWorld(), End, NextStart, 120.f, FColor::Yellow, false, -1.f, 0, 6.f);
 		}
 	}

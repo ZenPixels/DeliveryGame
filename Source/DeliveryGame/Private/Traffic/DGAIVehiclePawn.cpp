@@ -15,47 +15,92 @@ ADGAIVehiclePawn::ADGAIVehiclePawn(const FObjectInitializer& ObjectInitializer)
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	PathFollow = CreateDefaultSubobject<UDGPathFollowComponent>(TEXT("PathFollow"));
+	// No components created here — see the component block in the header. They are resolved from
+	// the Blueprint's own components in BeginPlay.
+}
 
-	USkeletalMeshComponent* VehicleMesh = GetMesh();
+UBoxComponent* ADGAIVehiclePawn::FindBox(const FName& Tag, const FString& NameSubstring) const
+{
+	TArray<UBoxComponent*> Boxes;
+	GetComponents<UBoxComponent>(Boxes);
 
-	// Query-only volumes: they must never push the vehicle around, only report overlaps.
-	RouteCollider = CreateDefaultSubobject<UBoxComponent>(TEXT("RouteCollider"));
-	RouteCollider->SetupAttachment(VehicleMesh);
-	RouteCollider->SetBoxExtent(FVector(120.f, 90.f, 60.f));
-	RouteCollider->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	RouteCollider->SetCollisionResponseToAllChannels(ECR_Overlap);
-	RouteCollider->SetGenerateOverlapEvents(true);
+	// Tag wins over name: BP_AI_Vehicle_Base identifies its routing marker by the "routing" tag,
+	// and a tag survives renaming the component.
+	for (UBoxComponent* Box : Boxes)
+	{
+		if (Box && !Tag.IsNone() && Box->ComponentHasTag(Tag))
+		{
+			return Box;
+		}
+	}
 
-	TrafficCollider = CreateDefaultSubobject<UBoxComponent>(TEXT("TrafficCollider"));
-	TrafficCollider->SetupAttachment(VehicleMesh);
-	TrafficCollider->SetRelativeLocation(FVector(400.f, 0.f, 0.f));
-	TrafficCollider->SetBoxExtent(FVector(250.f, 80.f, 60.f));
-	TrafficCollider->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	TrafficCollider->SetCollisionResponseToAllChannels(ECR_Overlap);
-	TrafficCollider->SetGenerateOverlapEvents(true);
+	for (UBoxComponent* Box : Boxes)
+	{
+		if (Box && !NameSubstring.IsEmpty() && Box->GetName().Contains(NameSubstring))
+		{
+			return Box;
+		}
+	}
 
-	StopZone = CreateDefaultSubobject<UBoxComponent>(TEXT("StopZone"));
-	StopZone->SetupAttachment(VehicleMesh);
-	StopZone->SetRelativeLocation(FVector(250.f, 0.f, 0.f));
-	StopZone->SetBoxExtent(FVector(150.f, 100.f, 80.f));
-	StopZone->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	StopZone->SetCollisionResponseToAllChannels(ECR_Overlap);
-	StopZone->SetGenerateOverlapEvents(true);
+	return nullptr;
+}
 
-	CrashAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("CrashAudio"));
-	CrashAudio->SetupAttachment(VehicleMesh);
-	CrashAudio->bAutoActivate = false;
+void ADGAIVehiclePawn::BindBlockingVolume(UBoxComponent* Volume)
+{
+	if (!Volume)
+	{
+		return;
+	}
+
+	// The authored volumes are not reliably set up for queries, so enforce it here rather than
+	// depending on per-Blueprint collision settings.
+	Volume->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Volume->SetCollisionResponseToAllChannels(ECR_Overlap);
+	Volume->SetGenerateOverlapEvents(true);
+	Volume->OnComponentBeginOverlap.AddDynamic(this, &ADGAIVehiclePawn::OnColliderBeginOverlap);
+	Volume->OnComponentEndOverlap.AddDynamic(this, &ADGAIVehiclePawn::OnColliderEndOverlap);
+}
+
+void ADGAIVehiclePawn::ResolveComponents()
+{
+	// Finds the Blueprint's own path-follow component once BP_Path_Follow is reparented onto
+	// UDGPathFollowComponent, so there is exactly one driving the vehicle.
+	PathFollow = FindComponentByClass<UDGPathFollowComponent>();
+	if (!PathFollow)
+	{
+		UE_LOG(LogDeliveryGame, Warning,
+			TEXT("%s has no Path Follow component; it will not drive. Add one, or check that "
+				 "BP_Path_Follow has been reparented onto UDGPathFollowComponent."), *GetName());
+	}
+
+	RouteCollider = FindBox(TEXT("routing"), TEXT("Route"));
+	TrafficCollider = FindBox(NAME_None, TEXT("Traffic"));
+	StopZone = FindBox(NAME_None, TEXT("Stop"));
+
+	// Apply the detection geometry from code — see bOverrideTrafficColliderShape.
+	if (bOverrideTrafficColliderShape && TrafficCollider)
+	{
+		TrafficCollider->SetRelativeLocation(TrafficColliderOffset);
+		TrafficCollider->SetRelativeRotation(FRotator::ZeroRotator);
+		TrafficCollider->SetBoxExtent(TrafficColliderExtent, /*bUpdateOverlaps=*/true);
+
+		UE_LOG(LogDeliveryGame, Verbose,
+			TEXT("%s traffic volume set to offset %s extent %s"),
+			*GetName(), *TrafficColliderOffset.ToCompactString(), *TrafficColliderExtent.ToCompactString());
+	}
+
+	// StopZone is genuinely optional — BP_AI_Vehicle_Base never had one.
+	BindBlockingVolume(TrafficCollider);
+	BindBlockingVolume(StopZone);
+
+	CrashAudio = FindComponentByClass<UAudioComponent>();
 }
 
 void ADGAIVehiclePawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	TrafficCollider->OnComponentBeginOverlap.AddDynamic(this, &ADGAIVehiclePawn::OnColliderBeginOverlap);
-	TrafficCollider->OnComponentEndOverlap.AddDynamic(this, &ADGAIVehiclePawn::OnColliderEndOverlap);
-	StopZone->OnComponentBeginOverlap.AddDynamic(this, &ADGAIVehiclePawn::OnColliderBeginOverlap);
-	StopZone->OnComponentEndOverlap.AddDynamic(this, &ADGAIVehiclePawn::OnColliderEndOverlap);
+	ResolveComponents();
 
 	if (USkeletalMeshComponent* VehicleMesh = GetMesh())
 	{
@@ -69,9 +114,11 @@ void ADGAIVehiclePawn::BeginPlay()
 		CrashAudio->SetSound(CrashSound);
 	}
 
-	if (PathFollow)
+	// Only ever turn debug drawing on from here. Mirroring the flag outright would clobber a
+	// per-component setting made in a child Blueprint or on a placed instance.
+	if (bDrawDebug && PathFollow)
 	{
-		PathFollow->bDrawDebug = bDrawDebug;
+		PathFollow->bDrawDebug = true;
 	}
 
 	// Start the cooldown expired so the first genuine impact is audible.
@@ -145,7 +192,46 @@ void ADGAIVehiclePawn::RecomputeOverlapBlockers()
 	GatherFrom(TrafficCollider);
 	GatherFrom(StopZone);
 
+	UpdateTrafficClearance();
 	SyncBlockedState();
+}
+
+void ADGAIVehiclePawn::UpdateTrafficClearance()
+{
+	if (!PathFollow)
+	{
+		return;
+	}
+
+	// Measured along our own forward axis, so a vehicle alongside in the next lane does not read as
+	// "directly ahead" the way a raw centre-to-centre distance would.
+	const FVector SelfLocation = GetActorLocation();
+	const FVector Forward = GetActorForwardVector().GetSafeNormal();
+	const FVector SelfVelocity = GetVelocity();
+
+	float NearestAhead = TNumericLimits<float>::Max();
+	float ClosingSpeed = 0.f;
+
+	for (const TWeakObjectPtr<AActor>& Weak : BlockingActors)
+	{
+		const AActor* Other = Weak.Get();
+		if (!Other)
+		{
+			continue;
+		}
+
+		const float AlongForward = FVector::DotProduct(Other->GetActorLocation() - SelfLocation, Forward);
+		if (AlongForward > 0.f && AlongForward < NearestAhead)
+		{
+			NearestAhead = AlongForward;
+
+			// Relative velocity along our heading: how fast this gap is actually shrinking. A parked
+			// or braking vehicle yields a large closing speed; one matching our speed yields zero.
+			ClosingSpeed = FVector::DotProduct(SelfVelocity - Other->GetVelocity(), Forward);
+		}
+	}
+
+	PathFollow->SetTrafficAhead(NearestAhead, ClosingSpeed);
 }
 
 void ADGAIVehiclePawn::OnColliderBeginOverlap(
@@ -166,7 +252,9 @@ void ADGAIVehiclePawn::SyncBlockedState()
 {
 	if (PathFollow)
 	{
-		PathFollow->bBlockedAhead = IsBlocked();
+		// Only manual holds hard-stop the vehicle. Overlaps feed TrafficClearance instead, so closing
+		// on a slower vehicle eases off rather than slamming to a halt the moment the volumes touch.
+		PathFollow->bBlockedAhead = (BlockerCount > 0);
 	}
 }
 
@@ -174,9 +262,22 @@ void ADGAIVehiclePawn::OnMeshHit(
 	UPrimitiveComponent* /*HitComponent*/, AActor* /*OtherActor*/, UPrimitiveComponent* /*OtherComp*/,
 	FVector NormalImpulse, const FHitResult& Hit)
 {
+	// Only CrashAudio is required. The Blueprint's audio component already has its MetaSound
+	// assigned, so requiring the CrashSound override here would silence every existing vehicle.
+	if (!CrashAudio || !CrashAudio->GetSound())
+	{
+		return;
+	}
+
 	const float ImpulseSize = NormalImpulse.Size();
+
+	// A light impact silences any crash still playing, mirroring the original's else branch.
 	if (ImpulseSize < CrashImpulseThreshold)
 	{
+		if (!CrashStopTriggerParameterName.IsNone())
+		{
+			CrashAudio->SetTriggerParameter(CrashStopTriggerParameterName);
+		}
 		return;
 	}
 
@@ -187,18 +288,12 @@ void ADGAIVehiclePawn::OnMeshHit(
 
 	TimeSinceLastCrashSound = 0.f;
 
-	if (!CrashAudio || !CrashSound)
-	{
-		return;
-	}
-
-	const float Intensity = FMath::GetMappedRangeValueClamped(
-		FVector2f(CrashImpulseThreshold, CrashImpulseAtFullIntensity), FVector2f(0.f, 1.f), ImpulseSize);
-
 	CrashAudio->SetWorldLocation(Hit.ImpactPoint);
 
 	if (!CrashIntensityParameterName.IsNone())
 	{
+		const float Intensity = FMath::GetMappedRangeValueClamped(
+			FVector2f(CrashImpulseThreshold, CrashImpulseAtFullIntensity), FVector2f(0.f, 1.f), ImpulseSize);
 		CrashAudio->SetFloatParameter(CrashIntensityParameterName, Intensity);
 	}
 
@@ -213,8 +308,7 @@ void ADGAIVehiclePawn::OnMeshHit(
 		CrashAudio->SetTriggerParameter(CrashTriggerParameterName);
 	}
 
-	UE_LOG(LogDeliveryGame, Verbose, TEXT("%s crash: impulse %.0f -> intensity %.2f"),
-		*GetName(), ImpulseSize, Intensity);
+	UE_LOG(LogDeliveryGame, Verbose, TEXT("%s crash: impulse %.0f"), *GetName(), ImpulseSize);
 }
 
 void ADGAIVehiclePawn::Tick(float DeltaSeconds)
@@ -222,6 +316,12 @@ void ADGAIVehiclePawn::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 
 	TimeSinceLastCrashSound += DeltaSeconds;
+
+	// The gap to a vehicle ahead changes every frame, so re-measure while anything is being tracked.
+	if (!BlockingActors.IsEmpty())
+	{
+		UpdateTrafficClearance();
+	}
 
 	if (bDrawDebugColliders)
 	{

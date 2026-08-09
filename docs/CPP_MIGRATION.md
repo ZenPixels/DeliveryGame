@@ -19,6 +19,36 @@ designer-tuned values, and map references survive.
 UHT has generated reflection code for all five. **The C++ bodies have not yet been compiled** —
 that needs an editor-closed build (see `CLAUDE.md`).
 
+## Road topology in Island — read this first
+
+Established 2026-08-04 by inspecting the level via `SceneTools.find_actors` and a top-down
+`CaptureViewport`, after three PIE failures caused by assuming otherwise.
+
+`Island` contains only **3 `BP_Path` splines, 3 deciders and 4 vehicles**
+(`BP_Path_C_1/2/3`, `BP_AI_Van_C_1/2/3`, `BP_AI_School_Bus_C_3`).
+
+- **Splines run along road *centre lines*** — the spline handles sit exactly on the dashed painted
+  divider, not along a lane.
+- **Roads are two-way**, one lane either side of that divider.
+- Therefore **one spline carries traffic in both directions**. Three splines cover the whole network.
+
+Two consequences that dominate the design:
+
+1. **Vehicles must be laterally offset from the spline to sit in a lane.** `LateralOffset` on the
+   path-follow template is 254.89 cm, recovered from the old `Route Collider` marker. It must flip
+   with travel direction or a reversed vehicle is pushed into oncoming traffic.
+2. **A path-following controller here must be direction-aware.** The Blueprint's cross-track
+   controller only ever pushed the vehicle *towards* the spline, so which way it travelled fell out
+   of whichever way it happened to be pointing — direction-agnostic for free. **Pure pursuit does not
+   have that property**: aiming at `DistanceAlongSpline + ForwardAimDistance` always advances along
+   the spline, so a vehicle needing to travel the other way U-turns and drives the road backwards.
+   Hence `TravelDirection` (+1/-1), decided from the vehicle's heading whenever a route is assigned.
+
+**Never filter candidate routes on spline alignment.** An early attempt rejected any route running
+against the vehicle's heading, which rejected roughly half of all legitimate routes and made
+behaviour worse. Use `IsPathUsable` (alignment *or* `bAllowReverseTravel`), never `IsPathAligned`
+alone, when choosing a route.
+
 ## The original algorithm
 
 Recovered from the live Blueprint via `BlueprintTools.read_graph_dsl`, not inferred. `BP_Path_Follow`
@@ -132,34 +162,156 @@ the Simple Construction Script component templates, not the Blueprint CDO** — 
 Not yet checked: per-instance overrides on actors placed in `Island`/`Test`. Those live in
 `__ExternalActors__` and will **not** carry across for any property whose name changed.
 
-## Reparenting steps (editor work)
+## Reparenting: done
 
-Do these one class at a time, testing in PIE between each.
+Completed 2026-08-04 via `BlueprintTools.set_parent`, with graphs stripped and each asset saved.
+All six compile clean and are non-dirty on disk.
 
-1. **Full build with the editor closed**, then reopen.
-2. **`BP_Path` → `ADGPathActor`.** Class Settings → Parent Class. The BP's own `Spline Path`
-   component will collide with the native one; delete the BP's copy and re-point spline data.
-   Set `NextPaths` per instance to wire junctions.
-3. **`BP_Path_Follow` → `UDGPathFollowComponent`.**
-4. **`BP_AI_Vehicle_Base` → `ADGAIVehiclePawn`.** Its `BP_AI_Van` and `BP_AI_School_Bus` children
-   follow automatically.
-5. **`BP_Path_Decider` → `ADGPathDeciderActor`.**
+| Blueprint | Parent | Stripped |
+| --- | --- | --- |
+| `BP_Path` | `ADGPathActor` | — (construction script left; it only sets spline draw-debug) |
+| `BP_Path_Follow` | `UDGPathFollowComponent` | 8 function graphs, 28 event nodes, 11 variables |
+| `BP_Path_Decider` | `ADGPathDeciderActor` | 11 event nodes |
+| `BP_AI_Vehicle_Base` | `ADGAIVehiclePawn` | 30 event nodes, `Update Debug`, 2 variables |
+| `BP_AI_Van`, `BP_AI_School_Bus` | `BP_AI_Vehicle_Base_C` | inherited, untouched |
 
-### The name-collision trap
+### Rules learned the hard way
 
-On reparent, a Blueprint variable or component whose name matches an inherited native property is
-**renamed** by the editor (e.g. `MaxThrottle` → `MaxThrottle_0`) rather than merged. The native
-property takes over with its **C++ default**, and the designer-tuned value stays on the renamed
-variable.
+1. **A native parent must not create components the Blueprint already owns.** `ADGPathActor`
+   originally made its own spline root; reparenting then displaced `BP_Path`'s `Spline Path`, broke
+   its component binding, and left the construction script reading None. All four native classes now
+   **resolve** their components (`ResolveRouteSpline`, `ResolveComponents`, `DecisionBox` in
+   `BeginPlay`) rather than creating them. This also avoids two path-follow components fighting over
+   the throttle.
+2. **Name collisions are display-name based.** `SplinePath` collided with `Spline Path`. Native
+   properties were renamed to `RouteSpline` / `TargetSpline` to stay clear of the Blueprint's own
+   names. Only an *exact* FName match is absorbed — `Destination` was, while `Max Throttle` vs
+   `MaxThrottle` was not, so it survived as a dead duplicate. **Tuned values therefore do not
+   transfer**; they must be re-entered as C++ defaults (done: `MaxThrottle 0.4`, `bDrawDebug true`).
+3. **Live Coding is not a foundation to reparent onto** — see the memory note. Patches vanish on
+   editor restart, leaving assets bound to stale class layouts.
+4. **MCP Blueprint edits are not auto-saved.** `set_parent` persisted; `delete_node`,
+   `remove_function_graph` and `remove_variable` did not, and a crash lost them. Call
+   `AssetTools.save_assets` after every mutation.
+5. **Strip callers before callees.** Deleting `BP_Path_Follow`'s `Get Next Target Spline` broke
+   `BP_Path_Decider`, which called it — the error only surfaced when the decider was recompiled. Run
+   `AssetTools.get_referencers` on anything before deleting parts of it; skipping that also broke
+   `BP_Prop_Traffic_Light_Sm`, which called the removed `Start Moving` / `Stop Moving`.
+6. **Setting a component-template value does not reach placed instances, and verifying on the
+   template will not reveal it.** Child vehicle Blueprints and placed actors carry archetype
+   overrides. Saving the level after changing a template serialises whatever the instances still hold
+   in memory as deltas, silently pinning the old value — `LateralOffset` stayed 0 through two test
+   rounds while the template read 254.89, so traffic drove down the centre line and *correctly* held a
+   target of zero.
 
-So for each collision: read the value off the renamed variable, type it into the native property in
-Class Defaults, *then* delete the renamed one. Do not delete first — the tuned value is lost.
+   **Always verify on the instance that actually runs**, e.g.
+   `Island.Island:PersistentLevel.BP_AI_Van_C_1.BP_Path_Follow`, not
+   `BP_AI_Vehicle_Base_C:BP_Path_Follow_GEN_VARIABLE`. For fleet-wide tuning prefer a **C++ default**,
+   which no archetype override can shadow; use `ObjectTools.reset_properties` to clear existing deltas
+   so instances track it again.
+7. **`ObjectTools.set_properties` writes struct fields only partially on a placed instance.** Writing
+   `relativeLocation {x,y,z}` to an instance component applied `x` and silently left `y`/`z` at their
+   old values; the same write against the class template applied in full. `reset_properties` did not
+   clear the deltas either. **Do not trust a struct write to an instance — read it back.**
 
-Values worth capturing before reparenting: `Forward Aim Distance`, `Max Throttle`, `Auto Find
-Spline`, and the extents/offsets of `Route Collider`, `Traffic Collider`, and `Stop Zone`.
+   Because of 6 and 7 together, the traffic detection volume could not be fixed reliably in the asset
+   at all, and **was still the broken 32 cm cube above the roof for every test up to 2026-08-05** —
+   meaning the follow logic had never once been exercised. Functional geometry is now applied from
+   `ADGAIVehiclePawn::ResolveComponents` under `bOverrideTrafficColliderShape`. Prefer code for
+   anything gameplay depends on; leave the asset for artistic placement.
+
+### Behaviour recovered from the graphs during stripping
+
+Details that were only discoverable by reading the real DSL, now reproduced natively:
+
+- **`StopMoving` applies the handbrake**, not just zero throttle. Without it a stopped vehicle rolls
+  away on any slope. `StartMoving` releases it.
+- **Crash MetaSound inputs are `"Reset Sound"` and `"Stop Sound"`** — not the `"Crash"`/`"Intensity"`
+  originally guessed, which would have left every crash silent. Threshold is
+  `VectorLength(NormalImpulse) / 1000 > 100`, i.e. **100000**; a sub-threshold hit fires
+  `"Stop Sound"`.
+- **`BP_Path_Decider` discovered its routes dynamically**, via
+  `GetOverlappingActors(DecisionBox, BP_Path_C)`, and excluded the vehicle's current route. An
+  authored-array-only design would have made every existing decider a silent no-op, so
+  `GatherValidTargets` falls back to overlap discovery when `TargetPaths` is empty, and
+  `ChoosePathFor` removes the current path.
+
+## Intended traffic design (from the author, 2026-08-04)
+
+The system the Blueprints were reaching for, stated directly rather than inferred. **The goal is
+traffic that obeys road rules and picks randomly at junctions — not a faithful port.**
+
+1. Every road has a spline down its middle; vehicles drive **offset to the right** to sit in a lane.
+2. A collision box at every intersection makes the vehicle pick a different spline to follow.
+3. A stoplight volume holds a vehicle from moving onto its chosen next spline until the light greens.
+4. A **front bumper volume** detects vehicles/objects ahead so the vehicle can **adjust speed** to
+   avoid collision — the author noted this was never fully implemented, and indeed the authored
+   volume was a 32 cm cube 100 cm *above* the vehicle centre, unable to overlap anything.
+
+Native status: (1) `LateralOffset` 254.89 along the **vehicle's** right. (2) `ADGPathDeciderActor`,
+random choice, current route excluded. (3) `ADGTrafficLightActor`. (4) `TrafficClearance` +
+`SafeFollowDistance`/`MinFollowDistance` proportional throttle; volume repositioned to
+`relativeLocation (600, 0, 30)`, `boxExtent (350, 90, 60)`.
+
+### Three holds, deliberately distinct
+
+Conflating these caused real bugs, so they are separate flags:
+
+| Flag | Source | Subject to `BlockedTimeout`? |
+| --- | --- | --- |
+| `bBlockedAhead` | `AddBlocker`/`RemoveBlocker` manual holds only | **Yes** — breaks mutual deadlocks |
+| `bHeldBySignal` | `ADGTrafficLightActor` | **No** — a timeout here would run red lights |
+| `TrafficClearance` | front volume overlaps, re-measured per tick | n/a — scales throttle, never a hard stop |
+
+Overlaps deliberately do **not** set `bBlockedAhead`; that made following binary. Clearance is
+measured as a dot product along the vehicle's own forward axis, so a vehicle in the next lane does
+not register as directly ahead.
+
+## State at end of 2026-08-05
+
+Working in PIE: vehicles hold their lanes, choose randomly at junctions, obey the phased traffic
+lights, and no longer drive in reverse. Speed limits are set to 25 mph on all three Island splines.
+
+Behaviour added after the reparent, in the order the failures surfaced:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| U-turns, reverse driving | pure pursuit has no direction; centreline splines are two-way | `TravelDirection`, re-scored but only below `DirectionFlipMaxSpeed` |
+| Drove in oncoming lane | offset applied along the *vehicle's* right, diluting as it yawed | route-relative offset + PD lane correction |
+| Settled 15 cm from centre | `LateralOffset` was 0 on instances — archetype shadowing | C++ default, verified on instances |
+| Wide turns, left the road | fixed 600 cm look-ahead; no slowing before corners | speed-scaled look-ahead; `GetCornerSpeedScale` |
+| Rear-ended stopped traffic | detection volume never worked; distance-only following | volume set from code; closing-speed braking |
+| Stopped and never restarted | `StopMoving` was terminal | `bAutoResume`; wider continuation radius |
+| Beached off-road | no recovery from an unsteerable position | `UpdateStuckRecovery` → `SnapToLane` |
+
+Tuning knobs, all on `UDGPathFollowComponent` unless noted: `LateralOffset` 254.89,
+`LaneCorrectionGain` 2.0, `LaneDampingGain` 0.7, `MinAimDistance` 220, `AimTimeAhead` 0.55,
+`FollowHeadwaySeconds` 1.6, `ComfortableDeceleration` 350, `MinCornerSpeedScale` 0.35,
+`SpeedLimitCompliance` 1.0, and `ADGPathActor::SpeedLimitMPH` per road.
+
+## Next session
+
+1. **Detection range does not scale with speed.** The traffic volume reaches 26 m
+   (`TrafficColliderExtent.X` 1150 at offset 1450), enough to brake from ~25 mph and no more. Raising
+   any speed limit much past 25 needs that derived from speed rather than left as a constant.
+2. **Cross-traffic false stops.** The volume is 23 m long and 1.8 m wide, so on a curve or through a
+   junction it can sweep into another lane and stop for a vehicle that is not really in the way.
+   `ShouldBlockFor` currently accepts any `ADGAIVehiclePawn`; filtering by heading alignment would fix
+   it if observed.
+3. **Signal holds are a single bool**, not reference counted. Two overlapping light volumes could have
+   one release a hold the other still wants.
+4. **Lane splines.** Agreed direction for the city map: replace centreline splines with one-way lane
+   splines, generated from the existing centrelines rather than hand-authored — the author's blocker
+   was tedium, so build the generator first. Removes both the lateral-offset and travel-direction
+   machinery entirely.
 
 ## Not yet done
 
+- **Untested in PIE.** Nothing below has been observed running; the migration is verified only by
+  compilation. Expect `ForwardAimDistance` (600) to need tuning, traffic to yield for the first time
+  now that `TrafficCollider` is functional, and vehicles to drive centred on splines.
+- **The decider overlap fallback exists only in a Live Coding patch.** Run a full editor-closed build
+  to persist it, or it is lost on the next restart.
 - No native `AGameModeBase` — `GlobalDefaultGameMode` still points at the nonexistent
   `/Game/ThirdPerson/Blueprints/BP_ThirdPersonGameMode`.
 - Player vehicle (`BP_Vehicle_Jeep`) and Enhanced Input untouched; still a standalone

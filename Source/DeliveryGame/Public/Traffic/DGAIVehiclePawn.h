@@ -30,23 +30,31 @@ class DELIVERYGAME_API ADGAIVehiclePawn : public AWheeledVehiclePawn
 public:
 	ADGAIVehiclePawn(const FObjectInitializer& ObjectInitializer);
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle")
+	// ------------------------------------------------------------ Components
+	//
+	// All of these are **resolved from the components the Blueprint already owns**, not created
+	// here. BP_AI_Vehicle_Base carries its own Route Collider, Traffic Collider, path-follow and
+	// crash-audio components, and creating natives alongside them would leave every vehicle with
+	// two path-follow components fighting over the throttle each frame. Resolution happens in
+	// BeginPlay via ResolveComponents().
+
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle")
 	TObjectPtr<UDGPathFollowComponent> PathFollow;
 
-	/** Marks this vehicle to path-decider volumes. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Colliders")
+	/** Marks this vehicle to path-decider volumes. Matched by the "routing" tag, then by name. */
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Colliders")
 	TObjectPtr<UBoxComponent> RouteCollider;
 
 	/** Forward-facing volume; overlaps hold the vehicle stationary. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Colliders")
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Colliders")
 	TObjectPtr<UBoxComponent> TrafficCollider;
 
-	/** Stop-sign / junction volume; overlaps hold the vehicle stationary. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Colliders")
+	/** Stop-sign / junction volume; overlaps hold the vehicle stationary. Optional. */
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Colliders")
 	TObjectPtr<UBoxComponent> StopZone;
 
-	/** Plays the crash MetaSound. Assign a MetaSound source to drive TriggerParameterName. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Audio")
+	/** Plays the crash MetaSound. Assign a MetaSound source to drive CrashTriggerParameterName. */
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "AI Vehicle|Audio")
 	TObjectPtr<UAudioComponent> CrashAudio;
 
 	// ---------------------------------------------------------------- Audio
@@ -55,25 +63,64 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio")
 	TObjectPtr<USoundBase> CrashSound;
 
-	/** Trigger input fired on the crash MetaSound. */
+	/**
+	 * Trigger fired on the crash MetaSound for an impact at or above the threshold.
+	 * "Reset Sound" is the input name MetaSound_Car_Crash actually exposes — it restarts the sound
+	 * so consecutive impacts retrigger rather than being swallowed.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio")
-	FName CrashTriggerParameterName = TEXT("Crash");
+	FName CrashTriggerParameterName = TEXT("Reset Sound");
 
-	/** Float input set to normalised impact strength before the trigger fires. */
+	/** Trigger fired for a sub-threshold impact, silencing any crash still playing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio")
-	FName CrashIntensityParameterName = TEXT("Intensity");
+	FName CrashStopTriggerParameterName = TEXT("Stop Sound");
 
-	/** Impacts below this impulse magnitude are ignored, so kerbs and scrapes stay silent. */
+	/**
+	 * Optional float input set to normalised impact strength before the trigger fires.
+	 * None by default: MetaSound_Car_Crash exposes no such input, and the original never set one.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio")
+	FName CrashIntensityParameterName = NAME_None;
+
+	/**
+	 * Impacts below this impulse magnitude stop the crash sound instead of playing it.
+	 * 100000 matches the original's `VectorLength(NormalImpulse) / 1000 > 100` test.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio", meta = (ClampMin = "0.0"))
-	float CrashImpulseThreshold = 20000.f;
+	float CrashImpulseThreshold = 100000.f;
 
-	/** Impulse magnitude that maps to full crash intensity. */
+	/** Impulse magnitude that maps to full crash intensity, when CrashIntensityParameterName is set. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio", meta = (ClampMin = "1.0"))
-	float CrashImpulseAtFullIntensity = 250000.f;
+	float CrashImpulseAtFullIntensity = 500000.f;
 
 	/** Minimum seconds between crash sounds, so one collision cannot machine-gun the trigger. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Audio", meta = (ClampMin = "0.0", Units = "s"))
 	float CrashSoundCooldown = 0.35f;
+
+	// ------------------------------------------------- Detection volume shape
+
+	/**
+	 * Force the traffic volume's shape at BeginPlay rather than trusting the authored component.
+	 *
+	 * **Keep this on.** The authored volume is a 32 cm cube 100 cm *above* the vehicle centre, which
+	 * can never overlap anything ahead, and every placed vehicle carries that as a per-instance
+	 * override. Fixing it in the asset proved unreliable — archetype overrides shadow the template,
+	 * and the editor tooling writes only the X component of a vector to an instance — so the geometry
+	 * is applied from code, which nothing can shadow or partially write.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Colliders")
+	bool bOverrideTrafficColliderShape = true;
+
+	/**
+	 * Centre of the traffic volume, relative to the vehicle. Reaches from roughly
+	 * `X - Extent.X` to `X + Extent.X` ahead, which must cover the braking distance at cruise speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Colliders")
+	FVector TrafficColliderOffset = FVector(1450.f, 0.f, 30.f);
+
+	/** Half-extent of the traffic volume. Y should be about a lane half-width. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Colliders")
+	FVector TrafficColliderExtent = FVector(1150.f, 90.f, 60.f);
 
 	// ---------------------------------------------------------------- Debug
 
@@ -130,6 +177,15 @@ protected:
 	virtual bool ShouldBlockFor_Implementation(AActor* OtherActor) const;
 
 private:
+	/** Bind PathFollow / colliders / audio to the components this actor already owns. */
+	void ResolveComponents();
+
+	/** First box component matching Tag, else one whose name contains NameSubstring. */
+	UBoxComponent* FindBox(const FName& Tag, const FString& NameSubstring) const;
+
+	/** Wire overlap events on a resolved blocking volume. */
+	void BindBlockingVolume(UBoxComponent* Volume);
+
 	/** Push the current blocker count onto the path-follow component. */
 	void SyncBlockedState();
 
@@ -148,4 +204,11 @@ private:
 
 	/** Rebuild BlockingActors from the current overlaps of TrafficCollider and StopZone. */
 	void RecomputeOverlapBlockers();
+
+	/**
+	 * Re-measure the distance to the nearest tracked obstacle ahead and push it to PathFollow.
+	 * Runs per tick while an overlap is live: the gap closes continuously, so sampling it only on
+	 * overlap enter/exit would leave a stale clearance and the wrong throttle.
+	 */
+	void UpdateTrafficClearance();
 };

@@ -33,16 +33,30 @@ class DELIVERYGAME_API ADGPathDeciderActor : public AActor
 public:
 	ADGPathDeciderActor();
 
-	/** Trigger volume. Named to match the old BP_Path_Decider "Decision Box". */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Decider")
+	/**
+	 * Trigger volume, **resolved from the box component this actor owns rather than created here.**
+	 *
+	 * BP_Path_Decider carries its own "Decision Box", and creating a native one would displace the
+	 * Blueprint's root, break its component binding, and leave every placed decider with the wrong
+	 * volume. Same reasoning as ADGPathActor::RouteSpline.
+	 */
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "Decider")
 	TObjectPtr<UBoxComponent> DecisionBox;
 
-	/** Routes a vehicle may be sent onto. Empty means this decider does nothing. */
+	/**
+	 * Routes a vehicle may be sent onto.
+	 *
+	 * **Leave empty to discover candidates dynamically** from whichever ADGPathActors overlap
+	 * DecisionBox — which is how BP_Path_Decider worked (`GetOverlappingActors(DecisionBox,
+	 * BP_Path_C)`), so existing deciders keep working with no authoring. Fill this in only to
+	 * constrain the choice to a specific set.
+	 */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Decider")
 	TArray<TObjectPtr<ADGPathActor>> TargetPaths;
 
+	/** Random by default: intersection choices should look arbitrary rather than cycle predictably. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decider")
-	EDGPathChoiceMode ChoiceMode = EDGPathChoiceMode::RoundRobin;
+	EDGPathChoiceMode ChoiceMode = EDGPathChoiceMode::Random;
 
 	/**
 	 * Re-derive the vehicle's progress from its position on the new route instead of entering at

@@ -319,11 +319,13 @@ planned but unbuilt.
 
 ## Next session
 
-1. **Road network build-out over MCP** — more stretches, 3-way junctions, closed loops (see
-   [[road-network-plans]] in memory). `ADGPathActor::RoutePoints` is the authoring hook. **This also
-   owns the junction connector arcs**, which fix the two remaining turn artefacts: corner-cutting
-   onto the wrong side, and turns clipping the opposite approach's signal pad below commit speed
-   (the last observed mid-junction stall, 2026-08-09).
+1. ~~**Road network build-out over MCP**~~ — **DONE 2026-08-09** (see [[road-network-plans]] in
+   memory for the built topology: 8 junctions, 10 path segments, zero dead ends, all deciders on
+   authored `TargetPaths`). `RoutePoints` authoring worked exactly as designed. **Junction connector
+   arcs remain unbuilt** — they fix the two remaining turn artefacts: corner-cutting onto the wrong
+   side, and turns clipping the opposite approach's signal pad below commit speed (the last observed
+   mid-junction stall, 2026-08-09). New junctions are unsignalized (lights exist only at the
+   original 4-way); random-choice T-junctions and corners rely on plain handoff.
 2. **Right-of-way at junctions** — demoted from top spot: most "standoffs" turned out to be vehicles
    detecting each other's 23 m *sensor volumes* (fixed — sensors now only count skeletal-mesh bodies,
    with oriented bounds). Real body-vs-body crossing conflicts remain possible but are now rare.

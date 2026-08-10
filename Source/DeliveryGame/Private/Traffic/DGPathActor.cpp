@@ -17,6 +17,31 @@ ADGPathActor::ADGPathActor()
 	// leaves the construction script reading None.
 }
 
+namespace
+{
+	/**
+	 * Rebuild Spline from actor-local Points. Shared by OnConstruction and BeginPlay: a spline
+	 * rebuilt only at construction time does NOT survive into PIE or a saved map unless the
+	 * component is also marked spline-edited — USplineComponent's instance-data restore reverts
+	 * unmarked curves to the Blueprint template's default 100 cm stub. That reversion is exactly
+	 * how the whole W-corner traffic pile-up happened (2026-08-09): every MCP-spawned road ran
+	 * fine in editor and became a 1 m path in PIE.
+	 */
+	void RebuildSplineFromPoints(USplineComponent& Spline, const TArray<FVector>& Points, bool bClosedLoop)
+	{
+		Spline.ClearSplinePoints(/*bUpdateSpline=*/false);
+		for (const FVector& Point : Points)
+		{
+			Spline.AddSplinePoint(Point, ESplineCoordinateSpace::Local, /*bUpdateSpline=*/false);
+		}
+		Spline.SetClosedLoop(bClosedLoop, /*bUpdateSpline=*/false);
+		Spline.UpdateSpline();
+
+		// Mark the per-instance curves authoritative so duplication (PIE) and save keep them.
+		Spline.bSplineHasBeenEdited = true;
+	}
+}
+
 void ADGPathActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
@@ -38,13 +63,7 @@ void ADGPathActor::OnConstruction(const FTransform& Transform)
 		return;
 	}
 
-	Spline->ClearSplinePoints(/*bUpdateSpline=*/false);
-	for (const FVector& Point : RoutePoints)
-	{
-		Spline->AddSplinePoint(Point, ESplineCoordinateSpace::Local, /*bUpdateSpline=*/false);
-	}
-	Spline->SetClosedLoop(bClosedLoopRoute, /*bUpdateSpline=*/false);
-	Spline->UpdateSpline();
+	RebuildSplineFromPoints(*Spline, RoutePoints, bClosedLoopRoute);
 }
 
 USplineComponent* ADGPathActor::GetRouteSpline() const
@@ -100,6 +119,13 @@ void ADGPathActor::BeginPlay()
 			TEXT("%s has no spline component; it will not be registered as a route. Add a Spline "
 				 "Component to this actor."), *GetName());
 		return;
+	}
+
+	// Runtime authority: an authored RoutePoints array always wins over whatever spline state was
+	// serialized or restored, so a route can never begin play as the template's default stub.
+	if (RoutePoints.Num() >= 2)
+	{
+		RebuildSplineFromPoints(*RouteSpline, RoutePoints, bClosedLoopRoute);
 	}
 
 	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)

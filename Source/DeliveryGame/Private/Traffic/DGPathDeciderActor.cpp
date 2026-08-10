@@ -153,6 +153,15 @@ void ADGPathDeciderActor::OnDecisionBoxBeginOverlap(
 		return;
 	}
 
+	// A vehicle that has already PLANNED this junction keeps its plan. The decider pre-empting the
+	// planned handoff was the deterministic stoplight U-turn: it snapped the vehicle onto its planned
+	// road near that road's END, the instant-handoff then bounced it onto the road it had just
+	// arrived on, and it departed back the way it came — a pirouette, every single time.
+	if (Vehicle->PathFollow->PlannedNextPath)
+	{
+		return;
+	}
+
 	ADGPathActor* NewPath = ChoosePathFor(Vehicle);
 	if (!NewPath)
 	{

@@ -210,13 +210,17 @@ void ADGAIVehiclePawn::RecomputeOverlapBlockers()
 		// explicitly; this also fires any end-overlap notifies that were missed.
 		Volume->UpdateOverlaps();
 
-		TArray<AActor*> Overlapping;
-		Volume->GetOverlappingActors(Overlapping);
-		for (AActor* Other : Overlapping)
+		// Count only vehicle BODIES. GetOverlappingActors matches any component — including the
+		// other vehicle's own 23 m detection volume, so two vehicles "touched" at 50 m and crossing
+		// sensors froze both drivers mid-junction (the diagnostic log caught the bus tracking a van
+		// at "0 cm" that was 82 m away).
+		TArray<UPrimitiveComponent*> OverlappingComponents;
+		Volume->GetOverlappingComponents(OverlappingComponents);
+		for (UPrimitiveComponent* Component : OverlappingComponents)
 		{
-			if (ShouldBlockFor(Other))
+			if (Component && Component->IsA<USkeletalMeshComponent>() && ShouldBlockFor(Component->GetOwner()))
 			{
-				BlockingActors.Add(Other);
+				BlockingActors.Add(Component->GetOwner());
 			}
 		}
 	};
@@ -256,9 +260,10 @@ void ADGAIVehiclePawn::UpdateTrafficClearance()
 
 	const FVector SelfVelocity = VelocityOf(this);
 
-	// Half-length of a mesh's world bounds as seen along Direction. Gaps must be bumper-to-bumper:
-	// centre-to-centre distances hide half of each vehicle's length as phantom cushion, which is how
-	// followers kept ramming the bus — its centre sits a long way from its rear bumper. Mesh bounds
+	// Half-length of a mesh along Direction, using its ORIENTED local bounds. Gaps must be
+	// bumper-to-bumper: centre-to-centre distances hide half of each vehicle's length as phantom
+	// cushion. World-AABB projection was close but inflated diagonally — a vehicle mid-turn at 45
+	// degrees read ~40% longer than it is, so "gap zero" fired at absurd real distances. Mesh bounds
 	// specifically, never actor bounds: those include the 25 m detection volume.
 	auto HalfLengthAlong = [](const USkeletalMeshComponent* BodyMesh, const FVector& Direction) -> float
 	{
@@ -266,8 +271,9 @@ void ADGAIVehiclePawn::UpdateTrafficClearance()
 		{
 			return 250.f; // roughly half a van, if there is no mesh to measure
 		}
-		const FVector E = BodyMesh->Bounds.BoxExtent;
-		return FMath::Abs(E.X * Direction.X) + FMath::Abs(E.Y * Direction.Y) + FMath::Abs(E.Z * Direction.Z);
+		const FVector LocalDir = BodyMesh->GetComponentTransform().InverseTransformVectorNoScale(Direction);
+		const FVector E = BodyMesh->GetLocalBounds().BoxExtent * BodyMesh->GetComponentTransform().GetScale3D();
+		return FMath::Abs(E.X * LocalDir.X) + FMath::Abs(E.Y * LocalDir.Y) + FMath::Abs(E.Z * LocalDir.Z);
 	};
 
 	const float SelfHalf = HalfLengthAlong(GetMesh(), Forward);
@@ -328,6 +334,27 @@ void ADGAIVehiclePawn::UpdateTrafficClearance()
 	}
 
 	PathFollow->SetTrafficAhead(NearestAhead, ClosingSpeed);
+
+	// Diagnostic: vehicles have been observed frozen on obstacles that do not exist. When anything
+	// reads as close, name it — the log answers "blocked by WHAT" definitively.
+	if (NearestAhead < 500.f)
+	{
+		static float LastPhantomLogTime = -100.f;
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+		if (Now - LastPhantomLogTime > 2.f)
+		{
+			LastPhantomLogTime = Now;
+			for (const TWeakObjectPtr<AActor>& Weak : BlockingActors)
+			{
+				if (const AActor* Other = Weak.Get())
+				{
+					UE_LOG(LogDeliveryGame, Log, TEXT("%s tracking %s at %.0f cm (2D dist %.0f)"),
+						*GetName(), *Other->GetName(), NearestAhead,
+						FVector::Dist2D(GetActorLocation(), Other->GetActorLocation()));
+				}
+			}
+		}
+	}
 }
 
 void ADGAIVehiclePawn::OnColliderBeginOverlap(

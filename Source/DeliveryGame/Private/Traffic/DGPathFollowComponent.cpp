@@ -599,7 +599,13 @@ void UDGPathFollowComponent::UpdateDestination()
 		// A stop-aspect signal gates the handoff: the goal stays pinned at this spline's end (the
 		// stop point) until green, and only then jumps to the next spline. A vehicle that already
 		// jumped is past the light's line and continues through untouched — commitment for free.
-		if (RemainingDistance <= PathEndTolerance && GetSignalBrake() <= 0.f)
+		//
+		// The one-second settling time prevents the bounce: a route assigned near its own end (a
+		// decider snap, a re-acquire) must not instantly hand off again in the same breath — that
+		// chain is how a vehicle departs back the way it came without any single choice being a
+		// U-turn.
+		if (RemainingDistance <= PathEndTolerance && GetSignalBrake() <= 0.f &&
+			GetTimeSinceLastPathChange() > 1.f)
 		{
 			AdvanceToNextPath();
 		}
@@ -740,6 +746,12 @@ bool UDGPathFollowComponent::ReacquireNearestPath()
 
 	TargetSpline = Nearest;
 	DistanceAlongSpline = FoundDistance;
+
+	// Re-derive travel direction from the vehicle's current heading. Keeping the OLD road's
+	// direction was a trap: if it pointed backwards on the new road, the aim sat behind the vehicle
+	// and the low-speed gate on direction flips blocked the correction — a fast re-acquired vehicle
+	// was locked chasing a goal behind it, veering kilometres off the map.
+	TravelDirection = IsPathAligned(Nearest) ? 1 : -1;
 
 	// Same bookkeeping as SetPath. Skipping it left the path-change timestamp stale, so the decider
 	// treated a just-re-acquired vehicle as fair game and immediately re-routed it — one corner of

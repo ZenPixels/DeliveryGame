@@ -319,13 +319,15 @@ planned but unbuilt.
 
 ## Next session
 
-1. **Right-of-way at junctions** — the top behavioural gap. Two vehicles meeting inside a junction
-   mutually yield via the follow channel and can stand nose-to-nose. Under kinematic movement this is
-   now a pure priority decision ("who waits"), no physics involved. Also covers left-turners crossing
-   the oncoming green stream.
-2. **Road network build-out over MCP** — more stretches, 3-way junctions, closed loops (see
-   [[road-network-plans]] in memory). `ADGPathActor::RoutePoints` is the authoring hook; kinematic
-   movement makes new junction geometry much safer to add.
+1. **Road network build-out over MCP** — more stretches, 3-way junctions, closed loops (see
+   [[road-network-plans]] in memory). `ADGPathActor::RoutePoints` is the authoring hook. **This also
+   owns the junction connector arcs**, which fix the two remaining turn artefacts: corner-cutting
+   onto the wrong side, and turns clipping the opposite approach's signal pad below commit speed
+   (the last observed mid-junction stall, 2026-08-09).
+2. **Right-of-way at junctions** — demoted from top spot: most "standoffs" turned out to be vehicles
+   detecting each other's 23 m *sensor volumes* (fixed — sensors now only count skeletal-mesh bodies,
+   with oriented bounds). Real body-vs-body crossing conflicts remain possible but are now rare.
+   Still worth a "who waits" rule eventually.
 3. **Physics-on-player-impact** — the second half of the "hybrid" decision: an AI vehicle hit by the
    player flips to simulation. Also cosmetic kinematic motion (wheel spin, body lean).
 4. **Signal holds are a single bool**, not reference counted — two overlapping light volumes could

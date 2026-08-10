@@ -1,6 +1,6 @@
 ---
 name: unreal-property-edits-shadowed
-description: "MCP property edits on Unreal class templates are shadowed by archetype overrides, and struct writes to instances apply only partially"
+description: "MCP property edits on Unreal templates are shadowed by archetype overrides; struct writes apply partially; programmatic spline rebuilds revert in PIE unless flagged bSplineHasBeenEdited"
 metadata: 
   node_type: memory
   type: feedback
@@ -21,7 +21,20 @@ Two failure modes cost several test cycles on DeliveryGame's traffic work (2026-
    vehicles' traffic-detection box as a 32 cm cube above the roof through *every* test, so the
    collision-avoidance code had never actually run.
 
-**Why:** both fail silently, and both defeat verification done on the wrong object. Reading the
+3. **Splines rebuilt programmatically in `OnConstruction` revert to the Blueprint template's
+   default curve in PIE** (and can revert in the editor world too). `USplineComponent`'s
+   instance-data restore keeps per-instance curves only when `bSplineHasBeenEdited` is set — hand
+   editing sets it, code does not. Cost a full traffic pile-up (2026-08-09): every MCP-spawned road
+   verified perfect in editor, then became the template's **100 cm stub** in PIE while its
+   `RoutePoints` array survived intact — the data was right and the derived state silently wasn't.
+   **Fix (both layers, in `ADGPathActor`):** set `Spline->bSplineHasBeenEdited = true` after any
+   rebuild, and rebuild from `RoutePoints` again in `BeginPlay` so runtime state is derived from
+   serialized data, never trusted from serialization of the derived object. Related quirk: the
+   editor does **not** rerun construction scripts while PIE is active — property writes and
+   transform nudges during PIE leave stale construction results (and a re-write of an identical
+   value skips reconstruction entirely).
+
+**Why:** all of these fail silently, and all defeat verification done on the wrong object. Reading the
 template back showed the intended value while the running instances used something else.
 
 **How to apply:**

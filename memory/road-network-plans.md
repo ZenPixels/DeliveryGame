@@ -34,6 +34,13 @@ wiring is recorded here). Coordinate frame: top-down with **+X up, +Y right** in
   **New-path trap: `SpeedLimitMPH` spawns at 0** (C++ default); existing paths use 25 per-instance.
 - **Not done:** junction connector arcs (turn quality), lights at new junctions, extra AI vehicles
   on the new ring, buildings/props for the placeholder destinations (author will place own assets).
+- **Validated in PIE 2026-08-09** (author: ran a long session, all vehicles circulating, no
+  pile-ups) — after fixing the spline-reversion trap ([[unreal-property-edits-shadowed]] item 3):
+  MCP-spawned paths became 100 cm stubs in PIE until `bSplineHasBeenEdited` + BeginPlay rebuild
+  landed in `ADGPathActor`. That fix is a **Live Coding patch — needs a full editor-closed build
+  baked before the editor closes.** Bonus find: the pile queued behind the player's parked jeep
+  (off-road) — AI correctly refuses to drive through any wheeled vehicle; only mattered because
+  broken splines had sent them off-road.
 
 Original agreement, from the author, 2026-08-09:
 

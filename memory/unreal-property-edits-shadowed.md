@@ -43,6 +43,11 @@ template back showed the intended value while the running instances used somethi
 - Always **read struct writes back** and expect only partial application on instances.
 - For anything gameplay depends on, prefer a **C++ default** or set it from code at `BeginPlay`
   (as `ADGAIVehiclePawn::bOverrideTrafficColliderShape` does) — neither can be shadowed.
+- When overriding component geometry from code, **normalise the whole transform: location,
+  rotation, AND scale, plus the shape extent.** The traffic-collider override set location+extent
+  but left a stray instance `RelativeScale3D` of (14.8, 3.4, 1) multiplying the extent into a
+  185 m sensor blade at runtime — masked for days by the 40 m sensor cull until the author saw the
+  box in the editor viewport (2026-08-10).
 - Scalars and bools do write correctly to instances; the problem is specific to structs.
 
 See [[deliverygame-mcp-toolsets]] and `docs/CPP_MIGRATION.md`.

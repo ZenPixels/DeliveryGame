@@ -105,6 +105,11 @@ void ADGAIVehiclePawn::ResolveComponents()
 	{
 		TrafficCollider->SetRelativeLocation(TrafficColliderOffset);
 		TrafficCollider->SetRelativeRotation(FRotator::ZeroRotator);
+
+		// Scale must be normalised too: the placed vans carried a stray (14.8, 3.4, 1) scale from
+		// the old partial struct writes, which multiplied the extent set below into a 185 m blade.
+		// The 40 m sensor cull masked it — the author spotted the box in the editor (2026-08-10).
+		TrafficCollider->SetRelativeScale3D(FVector::OneVector);
 		TrafficCollider->SetBoxExtent(TrafficColliderExtent, /*bUpdateOverlaps=*/true);
 
 		UE_LOG(LogDeliveryGame, Verbose,

@@ -61,9 +61,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Movement", meta = (ClampMin = "1.0"))
 	float KinematicBraking = 1200.f;
 
-	/** Fastest the heading may swing toward the goal. Higher = tighter, more arcade cornering. */
+	/** Fastest the heading may swing toward the goal. Higher = tighter, more arcade cornering.
+	 * 170 after the 90°-corner overshoot pass (2026-08-10): at 120 a vehicle at cruise swung a
+	 * wide enough arc to leave the road entirely at the new ring's corners. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Movement", meta = (ClampMin = "1.0", Units = "deg"))
-	float KinematicYawRate = 120.f;
+	float KinematicYawRate = 170.f;
 
 	/** Current kinematic speed along the vehicle's heading. */
 	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|Movement")
@@ -259,9 +261,10 @@ public:
 	float CornerFullSlowAngle = 50.f;
 
 	/** Fraction of the speed limit still permitted in the tightest corner. 0.25 of 25 mph is ~6 mph —
-	 * the bus jumped the kerb at the previous 0.35. */
+	 * the bus jumped the kerb at the previous 0.35; 0.18 after corner overshoot at the ring's 90°
+	 * corners still sent vans onto the grass (2026-08-10). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Throttle", meta = (ClampMin = "0.05", ClampMax = "1.0"))
-	float MinCornerSpeedScale = 0.25f;
+	float MinCornerSpeedScale = 0.18f;
 
 	/** Brake applied while blocked or stopped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Throttle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -314,9 +317,14 @@ public:
 	 *
 	 * Without this a vehicle that misses a corner keeps driving toward a stale aim point with no
 	 * steering error, holds the throttle open, and leaves the map.
+	 *
+	 * 3000, not 1500: a wide 90° corner arc peaks ~15-25 m off the new road, and at 1500 the
+	 * re-acquire fired mid-corner and rebound vehicles onto the road they had just left — the
+	 * grass-touring zigzag of 2026-08-10. The corner's own lane correction recovers anything
+	 * closer than this; re-acquire is for genuinely lost vehicles only.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Performance", meta = (ClampMin = "0.0", Units = "cm"))
-	float MaxDistanceFromPath = 1500.f;
+	float MaxDistanceFromPath = 3000.f;
 
 	/**
 	 * How much better the opposite travel direction must look before the vehicle switches to it.

@@ -3,6 +3,7 @@
 #include "Traffic/DGPathDeciderActor.h"
 
 #include "Components/BoxComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "DeliveryGame.h"
 #include "DrawDebugHelpers.h"
 #include "Traffic/DGAIVehiclePawn.h"
@@ -137,11 +138,22 @@ ADGPathActor* ADGPathDeciderActor::ChoosePathFor_Implementation(ADGAIVehiclePawn
 }
 
 void ADGPathDeciderActor::OnDecisionBoxBeginOverlap(
-	UPrimitiveComponent* /*OverlappedComponent*/, AActor* OtherActor, UPrimitiveComponent* /*OtherComp*/,
+	UPrimitiveComponent* /*OverlappedComponent*/, AActor* OtherActor, UPrimitiveComponent* OtherComp,
 	int32 /*OtherBodyIndex*/, bool /*bFromSweep*/, const FHitResult& /*SweepResult*/)
 {
 	ADGAIVehiclePawn* Vehicle = Cast<ADGAIVehiclePawn>(OtherActor);
 	if (!Vehicle || !Vehicle->PathFollow)
+	{
+		return;
+	}
+
+	// Only the vehicle's BODY may take a routing decision. Overlap events fire per component
+	// pair, and the forward traffic sensor reaches up to 25 m ahead of the bumper — so the sensor
+	// entered the decision box and collected the new route while the vehicle was still half a
+	// block away, which yanked its aim onto the new road that early and produced the diagonal
+	// corner-cut across the grass (caught by the OFF-ROAD tattletale, 2026-08-10: routed at
+	// N-mid, 21 m left of the new road 1.8 s later, still 12 m short of the pad).
+	if (!OtherComp || !OtherComp->IsA<USkeletalMeshComponent>())
 	{
 		return;
 	}

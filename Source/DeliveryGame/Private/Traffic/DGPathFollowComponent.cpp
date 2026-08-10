@@ -398,9 +398,33 @@ void UDGPathFollowComponent::SetPath(ADGPathActor* NewPath, bool bSnapToClosestP
 
 	if (bSnapToClosestPoint)
 	{
-		// Joining mid-route: heading alignment decides which way to travel, progress comes from
-		// wherever the vehicle actually is.
-		TravelDirection = IsPathAligned(TargetSpline) ? 1 : -1;
+		// Snapping near a terminus IS a junction entry, whatever the caller thought: the only
+		// direction that isn't a U-turn is inward. Deciders route with snap=true, and their boxes
+		// fire ~10 m before the pad — deriving direction from heading alignment there was a coin
+		// flip against a perpendicular road, and tails was the mid-street U-turn 2-3 car lengths
+		// short of the junction (author observation, 2026-08-10). Alignment still decides genuine
+		// mid-route joins, where either direction is legal.
+		float SnappedDistance = 0.f;
+		if (const AActor* Owner = GetOwner())
+		{
+			FVector Ignored;
+			TargetSpline->GetClosestPoint(Owner->GetActorLocation(), Ignored, SnappedDistance);
+		}
+
+		const float Length = TargetSpline->GetSplineLength();
+		const float NearEnd = FMath::Min(1500.f, Length * 0.25f);
+		if (SnappedDistance <= NearEnd)
+		{
+			TravelDirection = 1;
+		}
+		else if (SnappedDistance >= Length - NearEnd)
+		{
+			TravelDirection = -1;
+		}
+		else
+		{
+			TravelDirection = IsPathAligned(TargetSpline) ? 1 : -1;
+		}
 		UpdateDestination();
 	}
 	else
@@ -751,7 +775,24 @@ bool UDGPathFollowComponent::ReacquireNearestPath()
 	// direction was a trap: if it pointed backwards on the new road, the aim sat behind the vehicle
 	// and the low-speed gate on direction flips blocked the correction — a fast re-acquired vehicle
 	// was locked chasing a goal behind it, veering kilometres off the map.
-	TravelDirection = IsPathAligned(Nearest) ? 1 : -1;
+	//
+	// Near a terminus, though, inward beats alignment — same junction-entry rule as SetPath's
+	// snap branch, and the same coin-flip U-turn if skipped (a strayed vehicle usually re-binds
+	// right next to the junction it fumbled).
+	const float NearestLength = Nearest->GetSplineLength();
+	const float NearEnd = FMath::Min(1500.f, NearestLength * 0.25f);
+	if (FoundDistance <= NearEnd)
+	{
+		TravelDirection = 1;
+	}
+	else if (FoundDistance >= NearestLength - NearEnd)
+	{
+		TravelDirection = -1;
+	}
+	else
+	{
+		TravelDirection = IsPathAligned(Nearest) ? 1 : -1;
+	}
 
 	// Same bookkeeping as SetPath. Skipping it left the path-change timestamp stale, so the decider
 	// treated a just-re-acquired vehicle as fair game and immediately re-routed it — one corner of
@@ -845,6 +886,24 @@ void UDGPathFollowComponent::TickComponent(
 	float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+#if !UE_BUILD_SHIPPING
+	// Off-road tattletale (author request, 2026-08-10: "detect when the vehicles are leaving").
+	// The roadway is ~5 m from centreline to kerb; a vehicle further out than 7 m is on the grass.
+	// Modulo throttle instead of a member flag so this stays Live-Coding safe.
+	if (bIsMoving && FMath::Abs(CurrentLateralOffset) > 700.f)
+	{
+		if (const UWorld* World = GetWorld(); World && FMath::Fmod(World->GetTimeSeconds(), 2.f) < DeltaTime)
+		{
+			UE_LOG(LogDeliveryGame, Warning,
+				TEXT("%s OFF-ROAD: %.0f cm %s of %s (dir %d, %.0f cm along, route age %.1fs, planned %s)"),
+				*GetNameSafe(GetOwner()), FMath::Abs(CurrentLateralOffset),
+				CurrentLateralOffset < 0.f ? TEXT("left") : TEXT("right"),
+				*GetNameSafe(TargetSpline), TravelDirection, DistanceAlongSpline,
+				GetTimeSinceLastPathChange(), *GetNameSafe(PlannedNextPath));
+		}
+	}
+#endif
 
 	// Break mutual holds: two vehicles can each sit in the other's traffic volume and wait forever.
 	// Deliberately ignores bHeldBySignal — releasing that would mean running red lights.

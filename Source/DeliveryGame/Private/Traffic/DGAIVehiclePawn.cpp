@@ -200,6 +200,22 @@ bool ADGAIVehiclePawn::ShouldBlockFor_Implementation(AActor* OtherActor) const
 
 void ADGAIVehiclePawn::RecomputeOverlapBlockers()
 {
+	// Speed-scaled forward sensor. The full 25 m box is the braking-plus-headway distance at
+	// cruise and is correct on straights — but a slow vehicle turning through a junction with a
+	// 25 m blade reaches across the whole intersection and gets held by vehicles on the other
+	// legs (author observation, 2026-08-10: sensor ~5x the van). Length follows speed: ~5 m at a
+	// standstill up to the authored extent at cruise, anchored 50 cm ahead of the actor origin
+	// like the static shape was.
+	if (bOverrideTrafficColliderShape && TrafficCollider && PathFollow)
+	{
+		const float Speed = FMath::Abs(PathFollow->GetVehicleSpeed());
+		const float HalfLength = FMath::Clamp(250.f + Speed * 0.85f, 250.f, TrafficColliderExtent.X);
+		TrafficCollider->SetBoxExtent(
+			FVector(HalfLength, TrafficColliderExtent.Y, TrafficColliderExtent.Z), /*bUpdateOverlaps=*/false);
+		TrafficCollider->SetRelativeLocation(
+			FVector(HalfLength + 50.f, TrafficColliderOffset.Y, TrafficColliderOffset.Z));
+	}
+
 	BlockingActors.Reset();
 
 	auto GatherFrom = [this](UBoxComponent* Volume)

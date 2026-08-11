@@ -108,7 +108,10 @@ unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-l
 - **Driver personalities**: slow/over-safe drivers, reckless/fast drivers, etc. The tuning surface
   already exists per vehicle — `SpeedLimitCompliance`, `FollowHeadwaySeconds`,
   `ComfortableDeceleration`, `KinematicAcceleration/Braking/YawRate` — a personality is a named
-  preset over those knobs.
+  preset over those knobs. **Prototyped 2026-08-10 as per-instance values** on the 4 placed
+  vehicles (commuter/cautious/speeder/bus — see instance PathFollow components). When traffic
+  spawning arrives, formalize as named presets (data assets or C++ structs) instead of instance
+  edits. Observed gap: no overtaking — a speeder queues politely behind the bus forever.
 
 **How to apply:** favour designs that survive a city-sized map — the `UDGTrafficSubsystem` path
 registry over per-vehicle actor searches, throttled per-vehicle updates

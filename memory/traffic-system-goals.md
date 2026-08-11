@@ -71,6 +71,24 @@ unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-l
    instance fed from `KinematicSpeed` (angle rate = speed / wheel radius) plus steering angle on
    the front wheels from `GetSteeringInput()`. Body lean can ride along in the same layer.
 
+**Additional flags (author, 2026-08-10, during jeep-feel tuning):**
+6. **Skid/drifting sounds** — the drift state (DriftGripOn/Off events on the jeep BP) is the
+   natural trigger; pairs with the audio-tuning item above.
+7. **Crash sounds fire too easily and too loudly** for small jumps/impacts — threshold and volume
+   curve live in `ADGAIVehiclePawn` crash audio config and the jeep's OnComponentHit (BP);
+   `CrashImpulseThreshold` 100000 is evidently too low for landings.
+8. **Destructible props** — some props should break/explode on impact.
+9. **Stop signs** — govern traffic at some junctions; the right-of-way spec above already defines
+   4-way-stop behavior (everyone stops, FIFO, right-hand tiebreak) gated on sign props existing.
+10. **Surface-dependent resistance** — road vs grass acceleration/grip (physical materials per
+    surface; also affects AI if they ever route off-road).
+11. **Drift/skid marks** — decals left by the player during drift state (same trigger as #6).
+12. **Camera pitch clamp** (author, 2026-08-10): the player can rotate the camera under the world —
+    a direct consequence of disabling the spring arm's collision probe for jump feel. Fix: custom
+    PlayerCameraManager with ViewPitchMin ~ -25° / ViewPitchMax ~ +45° (author is even open to a
+    fully height-locked cam with limited yaw), assigned via a BP PlayerController on the GameMode.
+    Natural home for future camera-feel work (speed FOV kick, smoothed probe return).
+
 **Right-of-way rules (author, 2026-08-10 — the spec for the yield system when built):**
 - Turning traffic yields to straight-through traffic.
 - A left-turner yields to oncoming traffic (straight or right-turning).

@@ -6,6 +6,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "DGTrafficSubsystem.generated.h"
 
+class ADGAIVehiclePawn;
 class ADGPathActor;
 class ADGTrafficLightActor;
 
@@ -54,10 +55,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Traffic")
 	TArray<ADGTrafficLightActor*> GetRegisteredLights() const;
 
+	// ------------------------------------------------------------ Vehicles
+	//
+	// AI vehicles register so right-of-way can ask "who else is approaching this junction"
+	// without an actor iterator. Each vehicle scanning every other is O(N^2) per update —
+	// fine for a handful of vans, but pair this with a spatial bucket before city scale.
+
+	void RegisterVehicle(ADGAIVehiclePawn* Vehicle);
+	void UnregisterVehicle(ADGAIVehiclePawn* Vehicle);
+
+	UFUNCTION(BlueprintPure, Category = "Traffic")
+	TArray<ADGAIVehiclePawn*> GetRegisteredVehicles() const;
+
 private:
 	UPROPERTY()
 	TArray<TObjectPtr<ADGPathActor>> RegisteredPaths;
 
 	UPROPERTY()
 	TArray<TObjectPtr<ADGTrafficLightActor>> RegisteredLights;
+
+	UPROPERTY()
+	TArray<TObjectPtr<ADGAIVehiclePawn>> RegisteredVehicles;
 };

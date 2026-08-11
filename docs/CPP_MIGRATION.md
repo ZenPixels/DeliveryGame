@@ -326,10 +326,13 @@ planned but unbuilt.
    side, and turns clipping the opposite approach's signal pad below commit speed (the last observed
    mid-junction stall, 2026-08-09). New junctions are unsignalized (lights exist only at the
    original 4-way); random-choice T-junctions and corners rely on plain handoff.
-2. **Right-of-way at junctions** — demoted from top spot: most "standoffs" turned out to be vehicles
-   detecting each other's 23 m *sensor volumes* (fixed — sensors now only count skeletal-mesh bodies,
-   with oriented bounds). Real body-vs-body crossing conflicts remain possible but are now rare.
-   Still worth a "who waits" rule eventually.
+2. ~~**Right-of-way at junctions**~~ — **BUILT 2026-08-10** together with **generated junction turn
+   arcs** (run-time beziers in `UDGPathFollowComponent`, no authored arc actors — scales to the city
+   map for free). Rules per the author: turning yields to straight (which covers T-junction stems),
+   left turn yields to oncoming, crossing turners go first-come. Pairwise evaluation in
+   `ADGAIVehiclePawn::UpdateYieldAwareness` over `UDGTrafficSubsystem`'s vehicle registry (O(N²) —
+   flag before city scale); yields are their own braking channel (`YieldStopDistance`), so the
+   signal-hold refcount item below became moot. `ARC`/`YIELD`/off-road log lines cover diagnosis.
 3. **Physics-on-player-impact** — the second half of the "hybrid" decision: an AI vehicle hit by the
    player flips to simulation. Also cosmetic kinematic motion (wheel spin, body lean).
 4. **Signal holds are a single bool**, not reference counted — two overlapping light volumes could

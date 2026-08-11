@@ -74,6 +74,15 @@ who ruled on each; these are decided, not speculative):**
   normal, one dog treats, one water bottle to a polite young man near a small fire), rent notice
   at dusk, the mail truck idling across the street as you park at home.
 
+**Delivery interaction upgrade (author, 2026-08-10 — queued, not yet built):** pickup and
+drop-off should be **more than entering/exiting collision boxes**. Pickup = interacting (the
+author believes **E is already mapped to interact**) with an **actual item** — use `SM_box` as
+the placeholder package for everything at first. Drop-off = to a **person or a specific drop-off
+point**, also requiring the interact press. The green arrow keeps marking objectives for now;
+the author intends to shift to **something more subtle** eventually. Implementation home:
+`ADGDeliveryPointActor` gains an interact path (overlap = "in range", E = commit) and the
+subsystem gains a carried-package state; a person recipient ties into the NPC roster later.
+
 **Characters and dialog:** interacting with NPCs opens a **2D branching dialog, RPG-style**
 (player portrait one side, NPC the other). Possible side quests. Characters should be interesting,
 some **unsettling or threatening**. Canonical example — the water-bottle arsonist: an NPC who

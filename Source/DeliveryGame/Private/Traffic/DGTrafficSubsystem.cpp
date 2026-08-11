@@ -3,6 +3,7 @@
 #include "Traffic/DGTrafficSubsystem.h"
 
 #include "DeliveryGame.h"
+#include "Traffic/DGAIVehiclePawn.h"
 #include "Traffic/DGPathActor.h"
 #include "Traffic/DGTrafficLightActor.h"
 
@@ -77,6 +78,33 @@ TArray<ADGTrafficLightActor*> UDGTrafficSubsystem::GetRegisteredLights() const
 		if (Light)
 		{
 			Result.Add(Light);
+		}
+	}
+	return Result;
+}
+
+void UDGTrafficSubsystem::RegisterVehicle(ADGAIVehiclePawn* Vehicle)
+{
+	if (Vehicle)
+	{
+		RegisteredVehicles.AddUnique(Vehicle);
+	}
+}
+
+void UDGTrafficSubsystem::UnregisterVehicle(ADGAIVehiclePawn* Vehicle)
+{
+	RegisteredVehicles.RemoveSingleSwap(Vehicle);
+}
+
+TArray<ADGAIVehiclePawn*> UDGTrafficSubsystem::GetRegisteredVehicles() const
+{
+	TArray<ADGAIVehiclePawn*> Result;
+	Result.Reserve(RegisteredVehicles.Num());
+	for (const TObjectPtr<ADGAIVehiclePawn>& Vehicle : RegisteredVehicles)
+	{
+		if (Vehicle)
+		{
+			Result.Add(Vehicle);
 		}
 	}
 	return Result;

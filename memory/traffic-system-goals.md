@@ -52,6 +52,33 @@ rather than a hard cap — corner slowdown still applies on top of compliance.
   hold). Unexplained immobility — including driving off the road — means re-acquire the nearest
   spline, reset the goal, keep driving. No permanent parking, no teleporting.
 
+**BUILT 2026-08-10 (awaiting PIE validation):** generated **junction turn arcs** (bezier from lane
+through corner apex into the new road's lane; `bInTurnArc` commits the vehicle — signals/yields
+can't stop it mid-junction; `TurnArcSpeedMPH` 9; magenta debug draw) and the **right-of-way
+system** below (`UpdateYieldAwareness` on the pawn, pairwise over the subsystem's new vehicle
+registry, `YieldStopDistance` as its own braking channel — the hold-refcount fix became
+unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-latch cooldown).
+
+**Author's next focus list (2026-08-10, in their priority order, after traffic dial-in):**
+1. **Player jeep feel** — "still feels clunky and not quite fun" (long-standing).
+2. **Collision/near-miss reactions** — how AI vehicles respond when the player hits or buzzes them
+   (pairs with the planned physics-on-impact layer).
+3. **Randomized driver behavior** — the personality presets over existing knobs (below).
+4. **Audio tuning** — crash sounds and general car noise (CrashAudio/MetaSound plumbing exists).
+
+**Right-of-way rules (author, 2026-08-10 — the spec for the yield system when built):**
+- Turning traffic yields to straight-through traffic.
+- A left-turner yields to oncoming traffic (straight or right-turning).
+- At an uncontrolled 3-way T, the **terminating road yields to the through road** (through
+  traffic shouldn't even slow).
+- Uncontrolled 4-ways barely exist in reality; ours is signalized. 4-way STOPS exist only with
+  sign props (everyone stops, first-in-first-out, right-hand tiebreak) — future, with signs.
+- Agreed implementation shape: a per-junction **reservation/grant loop on the decider actor**
+  (it already knows its connected roads and has the volume); intent (straight/left/right)
+  classified from `PlannedNextPath`, which is known 2500 cm early; holds via the signal-hold
+  channel — which first needs the **hold refcount fix** (single bool today); and a mandatory
+  deadlock escape so four polite vans can't wave each other through forever.
+
 **Future traffic work the author has named** (do not build unprompted; design so they stay easy):
 - **Point-to-point routing**: vehicles planning a route between two locations over the spline graph
   and following it, replacing pure random choice at junctions.

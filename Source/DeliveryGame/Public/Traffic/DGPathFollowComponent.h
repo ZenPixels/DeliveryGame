@@ -363,6 +363,72 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Path Follow|State")
 	TObjectPtr<ADGPathActor> PlannedNextPath;
 
+	// ------------------------------------------------------ Junction turn arcs
+	//
+	// A turning handoff is driven along a bezier generated at run time — current lane position,
+	// through the corner apex, into the new road's lane past the junction — instead of chasing a
+	// point around a right angle. Generated rather than authored: arcs come free at every junction,
+	// including everything the future city map adds. Straight-through handoffs skip all of this.
+
+	/** Heading change above which a junction handoff is driven along a generated arc. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Junctions", meta = (ClampMin = "5.0", ClampMax = "120.0", Units = "deg"))
+	float TurnArcMinAngle = 25.f;
+
+	/** Distance before the route's end at which a turning vehicle leaves it for the arc. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Junctions", meta = (ClampMin = "100.0", Units = "cm"))
+	float TurnArcEntryDistance = 900.f;
+
+	/** How far along the NEW route (past the junction centre) the arc lands. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Junctions", meta = (ClampMin = "100.0", Units = "cm"))
+	float TurnArcExitDistance = 900.f;
+
+	/** Speed cap while driving a generated junction arc. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Junctions", meta = (ClampMin = "1.0", Units = "mph"))
+	float TurnArcSpeedMPH = 9.f;
+
+	/** Currently driving a generated junction arc. Committed: signals and yields no longer hold it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|State")
+	bool bInTurnArc = false;
+
+	// -------------------------------------------------------------- Yielding
+
+	/**
+	 * Distance to a give-way line ahead (right-of-way, not signals). Large means none. Pushed by
+	 * the owning pawn's right-of-way evaluation each tick, same pull pattern as SignalStopDistance
+	 * — recomputed from ground truth, so a stale yield cannot outlive one update.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|State")
+	float YieldStopDistance = 1000000.f;
+
+	/** Report the give-way line ahead. Pass a large value to mean "none". */
+	UFUNCTION(BlueprintCallable, Category = "Path Follow")
+	void SetYieldStopAhead(float DistanceCm);
+
+	/** Brake demand from the give-way line, same physics as GetSignalBrake. 0 while committed. */
+	UFUNCTION(BlueprintPure, Category = "Path Follow")
+	float GetYieldBrake() const;
+
+	// --------------------------------------------- Junction queries (right of way)
+
+	/** Distance left to the end being driven toward. Large for closed loops or no route. */
+	UFUNCTION(BlueprintPure, Category = "Path Follow")
+	float GetRemainingDistance() const;
+
+	/**
+	 * World location of the junction this vehicle is heading into: its route's end, or the arc
+	 * apex while mid-turn (the junction it is occupying). False when neither applies.
+	 */
+	bool GetJunctionLocation(FVector& OutLocation) const;
+
+	/** Heading (2D) the vehicle will arrive at that junction with. Current forward while mid-arc. */
+	bool GetArrivalDirection(FVector& OutDirection) const;
+
+	/**
+	 * Heading change of the planned movement through the junction ahead, in degrees; 0 when no
+	 * plan (or effectively straight). OutSignedZ > 0 turns right, < 0 turns left.
+	 */
+	float GetPlannedTurnAngle(float& OutSignedZ) const;
+
 	/**
 	 * How far from the end of a finished route to look for a continuation when the path has no
 	 * NextPaths entries. Routes further away than this are not considered connected.
@@ -605,6 +671,12 @@ protected:
 	/** Track immobility and, past StuckTimeout, park the vehicle until StuckRetryDelay elapses. */
 	void UpdateStuckRecovery(float DeltaTime);
 
+	/** Begin driving a generated arc onto Next. False when the movement is effectively straight. */
+	bool TryBeginTurnArc(ADGPathActor* Next);
+
+	/** Aim along the active arc; hands over to the target route on completion. */
+	void UpdateTurnArc();
+
 	void DrawDebugVisuals() const;
 
 	UChaosWheeledVehicleMovementComponent* GetMovement() const;
@@ -626,6 +698,21 @@ private:
 
 	/** World time of the last SetPath, for GetTimeSinceLastPathChange. */
 	float LastPathChangeTime = -1000.f;
+
+	// Active turn arc: quadratic bezier P0 (entry lane) -> P1 (apex) -> P2 (exit lane), plus the
+	// route it lands on. Progress is tracked as the nearest curve parameter, monotonically.
+	UPROPERTY(Transient)
+	TObjectPtr<ADGPathActor> TurnArcTarget;
+
+	FVector TurnArcP0 = FVector::ZeroVector;
+	FVector TurnArcP1 = FVector::ZeroVector;
+	FVector TurnArcP2 = FVector::ZeroVector;
+	float TurnArcNearestT = 0.f;
+	float TurnArcLength = 0.f;
+	float TurnArcAngleDeg = 0.f;
+	float TurnArcSignedZ = 0.f;
+	int32 TurnArcTargetDirection = 1;
+	float TurnArcExitAlong = 0.f;
 
 	/** Cut throttle/brake and hold with the handbrake once effectively stationary. */
 	void ApplyHoldOutputs(UChaosWheeledVehicleMovementComponent& Movement) const;

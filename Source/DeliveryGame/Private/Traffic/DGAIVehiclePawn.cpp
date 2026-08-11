@@ -151,6 +151,21 @@ void ADGAIVehiclePawn::BeginPlay()
 
 	// Start the cooldown expired so the first genuine impact is audible.
 	TimeSinceLastCrashSound = CrashSoundCooldown;
+
+	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)
+	{
+		Traffic->RegisterVehicle(this);
+	}
+}
+
+void ADGAIVehiclePawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)
+	{
+		Traffic->UnregisterVehicle(this);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 float ADGAIVehiclePawn::GetForwardSpeedMPH() const
@@ -483,6 +498,174 @@ void ADGAIVehiclePawn::UpdateSignalAwareness()
 	PathFollow->SetSignalStopAhead(NearestStopLine);
 }
 
+void ADGAIVehiclePawn::UpdateYieldAwareness(float DeltaSeconds)
+{
+	if (!PathFollow)
+	{
+		return;
+	}
+
+	const auto ClearYield = [this]()
+	{
+		PathFollow->SetYieldStopAhead(1000000.f);
+		CurrentYieldTo = nullptr;
+		TimeYieldHeld = 0.f;
+	};
+
+	const UWorld* World = GetWorld();
+	const UDGTrafficSubsystem* Traffic = World ? World->GetSubsystem<UDGTrafficSubsystem>() : nullptr;
+	if (!Traffic || !PathFollow->bIsMoving)
+	{
+		ClearYield();
+		return;
+	}
+
+	// Committed through the junction, or cooling down after a deadlock escape: no yielding.
+	if (PathFollow->bInTurnArc || World->GetTimeSeconds() < YieldSuppressedUntilTime)
+	{
+		ClearYield();
+		return;
+	}
+
+	const float MyRemaining = PathFollow->GetRemainingDistance();
+	if (MyRemaining > YieldEvaluateDistance)
+	{
+		ClearYield();
+		return;
+	}
+
+	FVector MyJunction, MyArrival;
+	if (!PathFollow->GetJunctionLocation(MyJunction) || !PathFollow->GetArrivalDirection(MyArrival))
+	{
+		ClearYield();
+		return;
+	}
+
+	float MySignedZ = 0.f;
+	const float MyAngle = PathFollow->GetPlannedTurnAngle(MySignedZ);
+	const bool bITurn = MyAngle >= YieldStraightAngle;
+	const bool bITurnLeft = bITurn && MySignedZ < 0.f;
+
+	// Speed floor keeps a stopped rival's ETA finite-but-large, so a queue parked at the junction
+	// doesn't hold cross traffic forever.
+	const float EtaSpeedFloor = 250.f;
+
+	const ADGAIVehiclePawn* YieldTo = nullptr;
+	const TCHAR* Reason = TEXT("");
+
+	for (ADGAIVehiclePawn* Other : Traffic->GetRegisteredVehicles())
+	{
+		if (!Other || Other == this || !Other->PathFollow)
+		{
+			continue;
+		}
+		const UDGPathFollowComponent* Theirs = Other->PathFollow;
+
+		FVector TheirJunction;
+		if (!Theirs->GetJunctionLocation(TheirJunction) ||
+			FVector::Dist2D(TheirJunction, MyJunction) > 600.f)
+		{
+			continue; // different junction
+		}
+
+		// Rule 0 — the junction is occupied: someone is mid-turn inside it. Wait it out; they
+		// clear in a couple of seconds and they were committed before we arrived.
+		if (Theirs->bInTurnArc)
+		{
+			YieldTo = Other;
+			Reason = TEXT("junction occupied");
+			break;
+		}
+
+		FVector TheirArrival;
+		if (!Theirs->GetArrivalDirection(TheirArrival))
+		{
+			continue;
+		}
+
+		// Same approach as us — that is a queue, and following distance already handles queues.
+		const float ApproachDot = FVector::DotProduct(MyArrival, TheirArrival);
+		if (ApproachDot > 0.7f)
+		{
+			continue;
+		}
+
+		const float TheirRemaining = Theirs->GetRemainingDistance();
+		const float TheirEta = TheirRemaining / FMath::Max(Theirs->GetVehicleSpeed(), EtaSpeedFloor);
+		if (TheirEta > YieldEtaWindow)
+		{
+			continue;
+		}
+
+		float TheirSignedZ = 0.f;
+		const float TheirAngle = Theirs->GetPlannedTurnAngle(TheirSignedZ);
+		const bool bTheyTurn = TheirAngle >= YieldStraightAngle;
+		const bool bTheyTurnLeft = bTheyTurn && TheirSignedZ < 0.f;
+		const bool bOncoming = ApproachDot < -0.7f;
+
+		if (bITurn && !bTheyTurn)
+		{
+			// Author rule 1: turning yields to straight. Also the T-junction rule in disguise —
+			// a stem arrival has no straight option, so the stem always yields to the bar.
+			YieldTo = Other;
+			Reason = TEXT("turning vs straight");
+			break;
+		}
+
+		if (bITurnLeft && bOncoming && !bTheyTurnLeft)
+		{
+			// Author rule 2: a left turn yields to oncoming traffic. Two opposite left-turners
+			// pass nose-to-nose without crossing, so those wave each other through.
+			YieldTo = Other;
+			Reason = TEXT("left turn vs oncoming");
+			break;
+		}
+
+		if (bITurn && bTheyTurn && !bOncoming)
+		{
+			// Crossing turners: first to the junction goes; deterministic ID break for dead heats.
+			if (TheirRemaining + 200.f < MyRemaining ||
+				(FMath::Abs(TheirRemaining - MyRemaining) <= 200.f && Other->GetUniqueID() < GetUniqueID()))
+			{
+				YieldTo = Other;
+				Reason = TEXT("crossing turns, they arrive first");
+				break;
+			}
+		}
+	}
+
+	if (!YieldTo)
+	{
+		ClearYield();
+		return;
+	}
+
+	// Deadlock escape: giving way is only meaningful to a vehicle that eventually goes. If the
+	// rival has been sitting still while we waited, take the junction — with a cooldown so the
+	// pair cannot re-latch the moment the yield re-evaluates.
+	TimeYieldHeld += DeltaSeconds;
+	const bool bRivalStopped = YieldTo->PathFollow->GetVehicleSpeed() < 60.f;
+	if (YieldDeadlockTimeout > 0.f && TimeYieldHeld > YieldDeadlockTimeout && bRivalStopped)
+	{
+		UE_LOG(LogDeliveryGame, Log, TEXT("%s waited %.1fs on stationary %s; proceeding to break the standoff."),
+			*GetName(), TimeYieldHeld, *YieldTo->GetName());
+		YieldSuppressedUntilTime = World->GetTimeSeconds() + 4.f;
+		ClearYield();
+		return;
+	}
+
+	if (CurrentYieldTo != YieldTo)
+	{
+		CurrentYieldTo = YieldTo;
+		UE_LOG(LogDeliveryGame, Log, TEXT("%s YIELD to %s (%s; me %.0f deg %s, junction in %.0f cm)"),
+			*GetName(), *YieldTo->GetName(), Reason,
+			MyAngle, bITurn ? (bITurnLeft ? TEXT("left") : TEXT("right")) : TEXT("straight"),
+			MyRemaining);
+	}
+
+	PathFollow->SetYieldStopAhead(FMath::Max(MyRemaining - YieldStandoffDistance, 0.f));
+}
+
 void ADGAIVehiclePawn::SyncBlockedState()
 {
 	if (PathFollow)
@@ -559,6 +742,8 @@ void ADGAIVehiclePawn::Tick(float DeltaSeconds)
 	RecomputeOverlapBlockers();
 
 	UpdateSignalAwareness();
+
+	UpdateYieldAwareness(DeltaSeconds);
 
 	if (bDrawDebugColliders && CVarDGTrafficDebugDraw.GetValueOnGameThread())
 	{

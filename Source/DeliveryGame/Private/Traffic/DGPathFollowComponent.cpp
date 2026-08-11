@@ -132,10 +132,145 @@ void UDGPathFollowComponent::SetSignalStopAhead(float DistanceCm)
 	SignalStopDistance = DistanceCm;
 }
 
+void UDGPathFollowComponent::SetYieldStopAhead(float DistanceCm)
+{
+	YieldStopDistance = DistanceCm;
+}
+
+float UDGPathFollowComponent::GetYieldBrake() const
+{
+	// Nothing to give way to.
+	if (YieldStopDistance >= 999999.f)
+	{
+		return 0.f;
+	}
+
+	// Committed: a vehicle already turning through the junction finishes the manoeuvre. Stopping
+	// inside the box is strictly worse than making someone else brake.
+	if (bInTurnArc)
+	{
+		return 0.f;
+	}
+
+	if (YieldStopDistance <= SignalStopMargin)
+	{
+		return 1.f;
+	}
+
+	const float Speed = GetVehicleSpeed();
+	const float RequiredDeceleration = (Speed * Speed) / (2.f * (YieldStopDistance - SignalStopMargin));
+	return FMath::Clamp(RequiredDeceleration / ComfortableDeceleration, 0.f, 1.f);
+}
+
+float UDGPathFollowComponent::GetRemainingDistance() const
+{
+	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
+	if (!Spline || Spline->IsClosedLoop())
+	{
+		return 1000000.f;
+	}
+
+	const float Length = Spline->GetSplineLength();
+	return (TravelDirection > 0) ? (Length - DistanceAlongSpline) : DistanceAlongSpline;
+}
+
+bool UDGPathFollowComponent::GetJunctionLocation(FVector& OutLocation) const
+{
+	// Mid-turn the vehicle *is* the junction traffic — report the arc apex so other approaches
+	// can recognise "same junction" and treat it as occupied.
+	if (bInTurnArc)
+	{
+		OutLocation = TurnArcP1;
+		return true;
+	}
+
+	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
+	if (!Spline || Spline->IsClosedLoop())
+	{
+		return false;
+	}
+
+	const float EndDistance = (TravelDirection > 0) ? Spline->GetSplineLength() : 0.f;
+	OutLocation = Spline->GetLocationAtDistanceAlongSpline(EndDistance, ESplineCoordinateSpace::World);
+	return true;
+}
+
+bool UDGPathFollowComponent::GetArrivalDirection(FVector& OutDirection) const
+{
+	if (bInTurnArc)
+	{
+		const AActor* Owner = GetOwner();
+		if (!Owner)
+		{
+			return false;
+		}
+		OutDirection = Owner->GetActorForwardVector().GetSafeNormal2D();
+		return true;
+	}
+
+	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
+	if (!Spline || Spline->IsClosedLoop())
+	{
+		return false;
+	}
+
+	const float EndDistance = (TravelDirection > 0) ? Spline->GetSplineLength() : 0.f;
+	OutDirection = (Spline->GetDirectionAtDistanceAlongSpline(EndDistance, ESplineCoordinateSpace::World)
+		* TravelDirection).GetSafeNormal2D();
+	return true;
+}
+
+float UDGPathFollowComponent::GetPlannedTurnAngle(float& OutSignedZ) const
+{
+	OutSignedZ = 0.f;
+
+	// Mid-arc, the movement was classified when the arc was built.
+	if (bInTurnArc)
+	{
+		OutSignedZ = TurnArcSignedZ;
+		return TurnArcAngleDeg;
+	}
+
+	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
+	const USplineComponent* NextSpline = PlannedNextPath ? PlannedNextPath->GetRouteSpline() : nullptr;
+	if (!Spline || !NextSpline || Spline->IsClosedLoop())
+	{
+		return 0.f;
+	}
+
+	const float EndDistance = (TravelDirection > 0) ? Spline->GetSplineLength() : 0.f;
+	const FVector EndLocation = Spline->GetLocationAtDistanceAlongSpline(EndDistance, ESplineCoordinateSpace::World);
+	const FVector EndDir = (Spline->GetDirectionAtDistanceAlongSpline(EndDistance, ESplineCoordinateSpace::World)
+		* TravelDirection).GetSafeNormal2D();
+
+	// Which way the next route is travelled follows from which terminus the junction sits at —
+	// the same rule the arc builder and the inward-entry latch use. Heading alignment would be a
+	// coin flip against a perpendicular road.
+	const float NextLength = NextSpline->GetSplineLength();
+	const float EntryKey = NextSpline->FindInputKeyClosestToWorldLocation(EndLocation);
+	const float EntryAlong = NextSpline->GetDistanceAlongSplineAtSplineInputKey(EntryKey);
+	const int32 NextDirection = (EntryAlong <= NextLength * 0.5f) ? 1 : -1;
+	const float ExitAlong = FMath::Clamp(EntryAlong + NextDirection * TurnArcExitDistance, 0.f, NextLength);
+	const FVector ExitDir = (NextSpline->GetDirectionAtDistanceAlongSpline(ExitAlong, ESplineCoordinateSpace::World)
+		* NextDirection).GetSafeNormal2D();
+
+	const float Dot = FMath::Clamp(FVector::DotProduct(EndDir, ExitDir), -1.f, 1.f);
+	OutSignedZ = FVector::CrossProduct(EndDir, ExitDir).Z;
+	return FMath::RadiansToDegrees(FMath::Acos(Dot));
+}
+
 float UDGPathFollowComponent::GetSignalBrake() const
 {
 	// Nothing governing ahead.
 	if (SignalStopDistance >= 999999.f)
+	{
+		return 0.f;
+	}
+
+	// Committed through the junction: the arc began on a proceed aspect, and DistanceAlongSpline
+	// is frozen at the old route's end while it runs — braking against that stale stop point would
+	// freeze the vehicle mid-junction, the exact thing signal commitment exists to prevent.
+	if (bInTurnArc)
 	{
 		return 0.f;
 	}
@@ -215,6 +350,13 @@ float UDGPathFollowComponent::GetEffectiveAimDistance() const
 
 float UDGPathFollowComponent::GetCornerSpeedScale() const
 {
+	// Arc speed is governed directly by GetTargetSpeedMPH; the spline scan below would be reading
+	// a frozen distance on the route being left.
+	if (bInTurnArc)
+	{
+		return 1.f;
+	}
+
 	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
 	if (!Spline)
 	{
@@ -331,6 +473,12 @@ float UDGPathFollowComponent::GetTimeSinceLastPathChange() const
 
 float UDGPathFollowComponent::GetTargetSpeedMPH() const
 {
+	// A junction arc is one continuous known bend: cap speed flat for its whole length.
+	if (bInTurnArc)
+	{
+		return TurnArcSpeedMPH * SpeedLimitCompliance;
+	}
+
 	// A road's own limit wins over the vehicle's default.
 	const float BaseLimit = (TargetSpline && TargetSpline->SpeedLimitMPH > 0.f)
 		? TargetSpline->SpeedLimitMPH
@@ -375,7 +523,9 @@ float UDGPathFollowComponent::GetFollowThrottleScale() const
 
 bool UDGPathFollowComponent::IsHeld() const
 {
-	return bHeldBySignal || bBlockedAhead || GetFollowThrottleScale() <= 0.f;
+	// A full yield brake counts as held: a vehicle politely waiting at a give-way line is
+	// "stillness with an observable reason", not stuck.
+	return bHeldBySignal || bBlockedAhead || GetFollowThrottleScale() <= 0.f || GetYieldBrake() >= 1.f;
 }
 
 void UDGPathFollowComponent::SetPath(ADGPathActor* NewPath, bool bSnapToClosestPoint)
@@ -454,6 +604,13 @@ void UDGPathFollowComponent::SetPath(ADGPathActor* NewPath, bool bSnapToClosestP
 
 void UDGPathFollowComponent::UpdateDestination()
 {
+	// A generated junction arc owns the aim point until it completes.
+	if (bInTurnArc)
+	{
+		UpdateTurnArc();
+		return;
+	}
+
 	const AActor* Owner = GetOwner();
 	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
 	if (!Owner || !Spline)
@@ -619,6 +776,19 @@ void UDGPathFollowComponent::UpdateDestination()
 			}
 		}
 
+		// A turning handoff leaves the route early and drives a generated arc through the junction
+		// mouth. Gated on signals AND yields: a vehicle giving way must not begin its turn, because
+		// beginning it is the commitment. Straight-through movements fall through to the ordinary
+		// end-of-route handoff below.
+		if (PlannedNextPath && RemainingDistance <= TurnArcEntryDistance &&
+			GetSignalBrake() <= 0.f && GetYieldBrake() <= 0.f && GetTimeSinceLastPathChange() > 1.f)
+		{
+			if (TryBeginTurnArc(PlannedNextPath))
+			{
+				return;
+			}
+		}
+
 		// Hand off once the end we are driving towards is reached — distance 0 when reversed.
 		// A stop-aspect signal gates the handoff: the goal stays pinned at this spline's end (the
 		// stop point) until green, and only then jumps to the next spline. A vehicle that already
@@ -628,7 +798,7 @@ void UDGPathFollowComponent::UpdateDestination()
 		// decider snap, a re-acquire) must not instantly hand off again in the same breath — that
 		// chain is how a vehicle departs back the way it came without any single choice being a
 		// U-turn.
-		if (RemainingDistance <= PathEndTolerance && GetSignalBrake() <= 0.f &&
+		if (RemainingDistance <= PathEndTolerance && GetSignalBrake() <= 0.f && GetYieldBrake() <= 0.f &&
 			GetTimeSinceLastPathChange() > 1.f)
 		{
 			AdvanceToNextPath();
@@ -851,6 +1021,200 @@ void UDGPathFollowComponent::UpdateStuckRecovery(float DeltaTime)
 	}
 }
 
+namespace
+{
+	/** 2D ray-ray intersection; false when near-parallel or behind A. */
+	bool RayRayIntersect2D(const FVector& A, const FVector& ADir, const FVector& B, const FVector& BDir, FVector& Out)
+	{
+		const float Denom = ADir.X * BDir.Y - ADir.Y * BDir.X;
+		if (FMath::Abs(Denom) < 1e-4f)
+		{
+			return false;
+		}
+		const float T = ((B.X - A.X) * BDir.Y - (B.Y - A.Y) * BDir.X) / Denom;
+		if (T <= 0.f)
+		{
+			return false;
+		}
+		Out = A + ADir * T;
+		return true;
+	}
+}
+
+bool UDGPathFollowComponent::TryBeginTurnArc(ADGPathActor* Next)
+{
+	AActor* Owner = GetOwner();
+	const USplineComponent* Spline = TargetSpline ? TargetSpline->GetRouteSpline() : nullptr;
+	const USplineComponent* NextSpline = Next ? Next->GetRouteSpline() : nullptr;
+	if (!Owner || !Spline || !NextSpline || Spline->IsClosedLoop())
+	{
+		return false;
+	}
+
+	const float Length = Spline->GetSplineLength();
+	const float EndDistance = (TravelDirection > 0) ? Length : 0.f;
+	const FVector EndLocation = Spline->GetLocationAtDistanceAlongSpline(EndDistance, ESplineCoordinateSpace::World);
+	const FVector EndDir = (Spline->GetDirectionAtDistanceAlongSpline(EndDistance, ESplineCoordinateSpace::World)
+		* TravelDirection).GetSafeNormal2D();
+
+	// Entry terminus decides the travel direction on the new route (inward), and the exit point
+	// sits TurnArcExitDistance past the junction so the arc lands settled in its lane.
+	const float NextLength = NextSpline->GetSplineLength();
+	const float EntryKey = NextSpline->FindInputKeyClosestToWorldLocation(EndLocation);
+	const float EntryAlong = NextSpline->GetDistanceAlongSplineAtSplineInputKey(EntryKey);
+	const int32 NextDirection = (EntryAlong <= NextLength * 0.5f) ? 1 : -1;
+	const float ExitAlong = FMath::Clamp(EntryAlong + NextDirection * TurnArcExitDistance, 0.f, NextLength);
+	const FVector ExitDir = (NextSpline->GetDirectionAtDistanceAlongSpline(ExitAlong, ESplineCoordinateSpace::World)
+		* NextDirection).GetSafeNormal2D();
+
+	const float Dot = FMath::Clamp(FVector::DotProduct(EndDir, ExitDir), -1.f, 1.f);
+	const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(Dot));
+	if (AngleDeg < TurnArcMinAngle)
+	{
+		// Effectively straight — the ordinary handoff drives it better than a degenerate arc.
+		return false;
+	}
+
+	// Lane-true endpoints: start where the vehicle actually is (already in its lane), land on the
+	// new route's own lane. The apex control point is where the two lane lines meet.
+	const FVector ExitPoint = NextSpline->GetLocationAtDistanceAlongSpline(ExitAlong, ESplineCoordinateSpace::World);
+	const FVector ExitRight = FVector::CrossProduct(FVector::UpVector, ExitDir).GetSafeNormal();
+
+	FVector P0 = Owner->GetActorLocation();
+	FVector P2 = ExitPoint + ExitRight * LateralOffset;
+	P2.Z = P0.Z;
+
+	FVector P1 = (P0 + P2) * 0.5f;
+	FVector Apex;
+	if (RayRayIntersect2D(P0, EndDir, P2, -ExitDir, Apex) && FVector::Dist2D(Apex, P0) < 4000.f)
+	{
+		P1 = Apex;
+		P1.Z = P0.Z;
+	}
+
+	TurnArcP0 = P0;
+	TurnArcP1 = P1;
+	TurnArcP2 = P2;
+	TurnArcNearestT = 0.f;
+	TurnArcTarget = Next;
+	TurnArcTargetDirection = NextDirection;
+	TurnArcExitAlong = ExitAlong;
+	TurnArcAngleDeg = AngleDeg;
+	TurnArcSignedZ = FVector::CrossProduct(EndDir, ExitDir).Z;
+
+	// Arc length estimate for converting the look-ahead distance into curve parameter.
+	TurnArcLength = 0.f;
+	FVector Previous = P0;
+	for (int32 i = 1; i <= 16; ++i)
+	{
+		const float T = i / 16.f;
+		const float U = 1.f - T;
+		const FVector Point = P0 * (U * U) + P1 * (2.f * U * T) + P2 * (T * T);
+		TurnArcLength += FVector::Dist2D(Previous, Point);
+		Previous = Point;
+	}
+
+	bInTurnArc = true;
+
+	// Consume the plan and stamp the change: mid-turn, deciders must treat this vehicle as served.
+	PlannedNextPath = nullptr;
+	if (const UWorld* World = GetWorld())
+	{
+		LastPathChangeTime = World->GetTimeSeconds();
+	}
+
+	UE_LOG(LogDeliveryGame, Log, TEXT("%s ARC %s turn: %s -> %s (%.0f deg, %.0f cm)"),
+		*GetNameSafe(Owner), TurnArcSignedZ > 0.f ? TEXT("right") : TEXT("left"),
+		*GetNameSafe(TargetSpline), *GetNameSafe(Next), AngleDeg, TurnArcLength);
+	return true;
+}
+
+void UDGPathFollowComponent::UpdateTurnArc()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner || !TurnArcTarget)
+	{
+		bInTurnArc = false;
+		return;
+	}
+
+	auto Bezier = [this](float T)
+	{
+		const float U = 1.f - T;
+		return TurnArcP0 * (U * U) + TurnArcP1 * (2.f * U * T) + TurnArcP2 * (T * T);
+	};
+
+	// Progress = nearest curve parameter, searched only forward of the last one so the tracker is
+	// monotonic and cannot double back around the apex.
+	const FVector Here = Owner->GetActorLocation();
+	float BestT = TurnArcNearestT;
+	float BestDistSq = TNumericLimits<float>::Max();
+	for (float T = TurnArcNearestT; T <= 1.f + KINDA_SMALL_NUMBER; T += 0.05f)
+	{
+		const float DistSq = FVector::DistSquared2D(Bezier(FMath::Min(T, 1.f)), Here);
+		if (DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			BestT = FMath::Min(T, 1.f);
+		}
+	}
+	TurnArcNearestT = BestT;
+
+	// Keep the tattletale honest mid-turn: "lateral offset" is the distance off the arc.
+	CurrentLateralOffset = FMath::Sqrt(BestDistSq);
+
+	// Something (a hold released late, a collision) carried the vehicle away from the arc
+	// entirely — fall back to the ordinary recovery rather than chasing a dead curve.
+	if (MaxDistanceFromPath > 0.f && CurrentLateralOffset > MaxDistanceFromPath)
+	{
+		UE_LOG(LogDeliveryGame, Log, TEXT("%s abandoned its turn arc %.0f cm off it; re-acquiring."),
+			*GetNameSafe(Owner), CurrentLateralOffset);
+		bInTurnArc = false;
+		TurnArcTarget = nullptr;
+		if (!ReacquireNearestPath())
+		{
+			StopMoving();
+		}
+		return;
+	}
+
+	const float AheadT = (TurnArcLength > 1.f) ? (GetEffectiveAimDistance() / TurnArcLength) : 1.f;
+	Destination = Bezier(FMath::Min(TurnArcNearestT + AheadT, 1.f));
+
+	if (bDrawDebug && CVarDGTrafficDebugDraw.GetValueOnGameThread())
+	{
+		FVector Previous = TurnArcP0;
+		for (int32 i = 1; i <= 16; ++i)
+		{
+			const FVector Point = Bezier(i / 16.f);
+			DrawDebugLine(GetWorld(), Previous, Point, FColor::Magenta, false, 0.12f, 0, 6.f);
+			Previous = Point;
+		}
+	}
+
+	// Landed: bind to the new route at the precomputed entry. Direct assignment, not SetPath — a
+	// snap here could rebind the far side of the junction, and direction was already decided.
+	if (TurnArcNearestT >= 0.9f || FVector::Dist2D(Here, TurnArcP2) <= PathEndTolerance)
+	{
+		ADGPathActor* Landed = TurnArcTarget;
+		bInTurnArc = false;
+		TurnArcTarget = nullptr;
+
+		TargetSpline = Landed;
+		TravelDirection = TurnArcTargetDirection;
+		DistanceAlongSpline = TurnArcExitAlong;
+		const float LandedLength = Landed->GetSplineLength();
+		PercentageAlongSpline = (LandedLength > KINDA_SMALL_NUMBER) ? DistanceAlongSpline / LandedLength : 0.f;
+		PlannedNextPath = nullptr;
+		if (const UWorld* World = GetWorld())
+		{
+			LastPathChangeTime = World->GetTimeSeconds();
+		}
+
+		UpdateDestination();
+	}
+}
+
 void UDGPathFollowComponent::AdvanceToNextPath()
 {
 	// The route was normally decided JunctionPlanDistance ago; choosing here is the fallback for a
@@ -1015,10 +1379,11 @@ void UDGPathFollowComponent::ProceedKinematic(float DeltaTime)
 		const float TargetMPH = GetTargetSpeedMPH();
 		DesiredSpeed = ((TargetMPH > 0.f) ? TargetMPH : CruiseSpeedMPH) * 44.704f;
 
-		// The vehicle ahead and the stop line both cap speed; the strictest wins. Where physics mode
-		// converted these into brake pedal pressure, kinematic just obeys them exactly.
+		// The vehicle ahead, the stop line, and the give-way line all cap speed; the strictest
+		// wins. Where physics mode converted these into brake pedal pressure, kinematic just
+		// obeys them exactly.
 		DesiredSpeed *= GetFollowThrottleScale();
-		DesiredSpeed *= 1.f - FMath::Max(GetFollowBrake(), GetSignalBrake());
+		DesiredSpeed *= 1.f - FMath::Max3(GetFollowBrake(), GetSignalBrake(), GetYieldBrake());
 	}
 
 	// ---- Integrate speed ----

@@ -142,6 +142,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Signals", meta = (ClampMin = "0.0", Units = "cm"))
 	float SignalDetectionRange = 3500.f;
 
+	// ---------------------------------------------------------- Right of way
+	//
+	// Author's rules (2026-08-10): turning yields to straight; a left turn yields to oncoming; at
+	// an uncontrolled T the terminating road yields to the through road — which falls out of
+	// "turning yields to straight" for free, because a stem arrival has no straight option.
+	// Evaluated pairwise per vehicle against the subsystem's registry, pushed to PathFollow as a
+	// give-way line. No junction manager: intent (PlannedNextPath) is known ~25 m early, so each
+	// vehicle can classify every rival's movement the same way it classifies its own.
+
+	/** How far before its junction a vehicle starts weighing right-of-way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|RightOfWay", meta = (ClampMin = "0.0", Units = "cm"))
+	float YieldEvaluateDistance = 2000.f;
+
+	/** Stop this far short of the junction centre when giving way — roughly the pad edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|RightOfWay", meta = (ClampMin = "0.0", Units = "cm"))
+	float YieldStandoffDistance = 650.f;
+
+	/** A conflicting vehicle arriving within this many seconds is given way to. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|RightOfWay", meta = (ClampMin = "0.1", Units = "s"))
+	float YieldEtaWindow = 3.f;
+
+	/** Give way to a vehicle that is itself stopped for at most this long, then proceed anyway. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|RightOfWay", meta = (ClampMin = "0.0", Units = "s"))
+	float YieldDeadlockTimeout = 5.f;
+
+	/** Movements within this angle of dead ahead count as "straight" for right-of-way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|RightOfWay", meta = (ClampMin = "5.0", ClampMax = "80.0", Units = "deg"))
+	float YieldStraightAngle = 25.f;
+
 	// ---------------------------------------------------------------- Debug
 
 	/** Draw the path-follow aim line and status text. */
@@ -174,6 +203,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
 	UFUNCTION()
@@ -247,4 +277,20 @@ private:
 	 * ground truth every tick, so no hold can go stale.
 	 */
 	void UpdateSignalAwareness();
+
+	/**
+	 * Evaluate the right-of-way rules against every other registered vehicle approaching the same
+	 * junction, and push the resulting give-way line (or "none") to PathFollow. Same pull-model
+	 * contract as UpdateSignalAwareness.
+	 */
+	void UpdateYieldAwareness(float DeltaSeconds);
+
+	/** Who this vehicle is currently giving way to, for transition logging only. */
+	TWeakObjectPtr<const AActor> CurrentYieldTo;
+
+	/** Seconds continuously spent giving way, for the deadlock escape. */
+	float TimeYieldHeld = 0.f;
+
+	/** World time before which yields are ignored, set by the deadlock escape. */
+	float YieldSuppressedUntilTime = -1.f;
 };

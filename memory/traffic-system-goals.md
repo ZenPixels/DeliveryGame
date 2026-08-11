@@ -52,7 +52,8 @@ rather than a hard cap — corner slowdown still applies on top of compliance.
   hold). Unexplained immobility — including driving off the road — means re-acquire the nearest
   spline, reset the goal, keep driving. No permanent parking, no teleporting.
 
-**BUILT 2026-08-10 (awaiting PIE validation):** generated **junction turn arcs** (bezier from lane
+**BUILT 2026-08-10, PIE-VALIDATED same day** (author: "arcs and turns looking good... no
+collisions or weird behavior"): generated **junction turn arcs** (bezier from lane
 through corner apex into the new road's lane; `bInTurnArc` commits the vehicle — signals/yields
 can't stop it mid-junction; `TurnArcSpeedMPH` 9; magenta debug draw) and the **right-of-way
 system** below (`UpdateYieldAwareness` on the pawn, pairwise over the subsystem's new vehicle
@@ -65,6 +66,10 @@ unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-l
    (pairs with the planned physics-on-impact layer).
 3. **Randomized driver behavior** — the personality presets over existing knobs (below).
 4. **Audio tuning** — crash sounds and general car noise (CrashAudio/MetaSound plumbing exists).
+5. **Wheel rotation on kinematic vehicles** (author, 2026-08-10): Chaos used to animate the wheel
+   bones; kinematic movement leaves them frozen. We must spin them ourselves — likely an anim
+   instance fed from `KinematicSpeed` (angle rate = speed / wheel radius) plus steering angle on
+   the front wheels from `GetSteeringInput()`. Body lean can ride along in the same layer.
 
 **Right-of-way rules (author, 2026-08-10 — the spec for the yield system when built):**
 - Turning traffic yields to straight-through traffic.

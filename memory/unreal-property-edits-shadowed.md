@@ -43,6 +43,25 @@ template back showed the intended value while the running instances used somethi
 - Always **read struct writes back** and expect only partial application on instances.
 - For anything gameplay depends on, prefer a **C++ default** or set it from code at `BeginPlay`
   (as `ADGAIVehiclePawn::bOverrideTrafficColliderShape` does) — neither can be shadowed.
+- **Do not add components to a Blueprint over MCP and expect them to work.**
+  `ActorTools.add_component` against a Blueprint CDO produces a *half-real* component
+  (2026-08-12): it appears in `get_components` on instances, but `list_variables` does not list
+  it, and property values set on the template (static mesh, visibility, relative location) reach
+  some instances and not others — the ones spawned via `add_to_scene_from_asset` carried
+  overrides that blocked it, so one delivery point showed its parcel and four did not. Also note
+  object-reference pins fed a **string asset path from the graph DSL silently resolve to null**
+  (`SetStaticMesh` quietly assigned nothing, with no runtime error). Create gameplay components
+  in **C++** (`CreateDefaultSubobject` + `ConstructorHelpers`) — see
+  `ADGDeliveryPointActor::ParcelMesh`.
+- **Check the ACTOR's `bHidden` before debugging component visibility.** Actor-Hidden-In-Game
+  hides every component the actor owns, silently overriding per-component `bVisible` /
+  `bHiddenInGame` — which read as perfectly correct while nothing rendered. Cost most of an
+  evening (2026-08-12): four of five delivery points carried `bHidden=true` saved in the map
+  (they began as one-shot VFX markers that the old Blueprint system hid), so only the single
+  un-hidden point ever displayed its parcel. `SetActorHiddenInGame(false)` in `BeginPlay` is the
+  unshadowable fix. **General lesson: when a visual does not appear, verify the whole visibility
+  chain — actor hidden, component visible, component hidden-in-game, mesh assigned, transform,
+  and only then position.**
 - When overriding component geometry from code, **normalise the whole transform: location,
   rotation, AND scale, plus the shape extent.** The traffic-collider override set location+extent
   but left a stray instance `RelativeScale3D` of (14.8, 3.4, 1) multiplying the extent into a

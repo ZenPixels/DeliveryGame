@@ -735,7 +735,8 @@ void UDGPathFollowComponent::UpdateDestination()
 
 		// Proportional-derivative: pull toward the lane by the error outstanding, but ease off by how
 		// fast the gap is already closing. Proportional alone overshoots into the oncoming lane.
-		const float LaneError = LateralOffset - CurrentLateralOffset;
+		// DodgeOffset rides on top: the near-miss swerve is just a temporarily displaced lane.
+		const float LaneError = (LateralOffset + DodgeOffset) - CurrentLateralOffset;
 		const float Correction = FMath::Clamp(
 			LaneError * LaneCorrectionGain - LateralRate * LaneDampingGain,
 			-MaxLaneCorrection, MaxLaneCorrection);
@@ -1250,6 +1251,19 @@ void UDGPathFollowComponent::TickComponent(
 	float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Handed to physics: the simulation owns the body. Touching the transform, the aim point, or
+	// the stuck logic while a crash plays out would fight it — the pawn resumes us when it ends.
+	if (bSuspendedForPhysics)
+	{
+		return;
+	}
+
+	// The dodge is a reflex, not a lane change: it always relaxes back to the authored lane.
+	if (!FMath::IsNearlyZero(DodgeOffset))
+	{
+		DodgeOffset = FMath::FInterpConstantTo(DodgeOffset, 0.f, DeltaTime, DodgeRelaxRate);
+	}
 
 #if !UE_BUILD_SHIPPING
 	// Off-road tattletale (author request, 2026-08-10: "detect when the vehicles are leaving").

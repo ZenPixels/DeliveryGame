@@ -22,10 +22,50 @@ tier with a random node over its pool, keep the existing `Reset Sound` / `Stop S
 
 - [ ] **Skid/drift loop** — looping tire squeal. Trigger already exists: start on
       `DriftGripOn`, stop on `DriftGripOff` (jeep Blueprint events).
+- [ ] **Car horn pool** — 2-3 honks. Hook LIVE: `ADGAIVehiclePawn::HornSound` plays on
+      near-miss dodge (null-safe, silent until assigned). Different horns per vehicle =
+      personality flavor for free.
 - [ ] **Surface rolling ambience** (later, pairs with surface-resistance work) — road hum vs
       grass rumble.
 - [ ] Crash sounds for **AI vehicles** can share the same pools (their audio is positional
       now; volume-scaling for AI needs a small C++ pass, flagged).
+
+## Vehicle damage (backlog feature, author 2026-08-11 — needs art before code)
+
+Author wants **player and NPC vehicle damage** as a real system. Sketch from the conversation:
+windows breaking, doors falling off, mirrors snapping, tires flying off, **a few levels of
+damage**, and — for the worst crashes only — **fire and explosion with all four tires shooting
+out**. Note the deliberate irony: "all four wheels come off" was a *bug* at ordinary impact
+(fixed 2026-08-11 by simulating chassis only); it becomes a *reward* reserved for spectacular
+crashes. Already shipped as the first step: single-wheel detach near a hard impact
+(`bAllowWheelDetach` / `WheelDetachImpulse` / `WheelDetachRadius` on ADGAIVehiclePawn), which
+also forces the Wrecked state.
+
+- [ ] **Damage-state meshes or swappable parts** per vehicle (clean → dented → wrecked), or
+      breakable sub-meshes for doors/mirrors/windows.
+- [ ] **Glass break VFX/SFX**, debris particles.
+- [ ] **Fire + explosion VFX/SFX** for catastrophic crashes.
+- [ ] Player jeep needs the same treatment (its damage state is also the visible cost of the
+      insurance economy — see game-vision).
+
+## Sky / day-night (mostly programmatic — this is the whole asset list)
+
+`SkyAtmosphere` computes the sky from the sun's angle, so sunrise/sunset/dusk/darkness all come
+free from rotating the directional light. What it does **not** provide:
+
+- [ ] **Starfield** — cubemap or panoramic texture for the night sky. The one genuine asset need.
+- [ ] **A better moon** (author, 2026-08-13: "need a new moon"). The atmosphere currently draws a
+      plain bright disc via the moon light's `LightSourceAngle` +
+      `AtmosphereSunDiskColorScale`. A real moon wants a texture — cratered, ideally with a
+      subtle halo. Knobs live on `UDGTimeOfDaySubsystem`: `MoonDiscAngleDegrees`,
+      `MoonDiscBrightness`, `MoonColor`, `MoonIntensity`.
+- [ ] Optional: night ambience audio bed, night grading LUT.
+- [ ] **Emissive lamp/window materials** for the night-lighting work (streetlamps, shop signage,
+      building windows) — see BACKLOG "Night lighting".
+
+Notes for the build: delete/hide the legacy `SM_SkySphere` (it occludes `SkyAtmosphere` and does
+not follow a moving sun); set `SkyLight` to **Real Time Capture**; the directional light must be
+**Movable**, which means abandoning the baked lighting in `Island_BuiltData`.
 
 ## World / props
 

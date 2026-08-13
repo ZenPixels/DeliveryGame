@@ -20,8 +20,64 @@ and **GTA-style roadblocks gating areas until story beats resolve**.
 car**; on-foot **platforming** to reach places the car can't. ("Just delivering things in time might
 be enough" — the author is unsure how much more system weight the loop needs.)
 
+**CORE LOOP EVOLUTION (author, 2026-08-11/12 — the target design; the built slice is still
+single-job):**
+- **Passenger deliveries ("Uber app")** alongside packages. You drive a *person*. Recognised
+  purpose: **lore delivery** — a passenger is a captive audience who can talk *while you drive*,
+  which converts otherwise dead driving time into story time (same job the podcasts do, but
+  interactive). Prime candidates: the arsonist, the Mailman, the talking dog after the collar.
+- **Multiple simultaneous opportunities** — several packages plus a passenger available at once;
+  the player chooses what to take. The game becomes **triage**, not just driving.
+- **Offers themselves expire**: a countdown on each *opportunity*, not only on accepted jobs.
+  This is what forces choosing under uncertainty instead of accepting everything and optimising.
+- **Decaying payout instead of binary failure**: each job has a **full value** window; miss it and
+  the driver's tip/cut ticks down toward zero rather than the job failing outright. (Replaces the
+  current hard fail. Also the natural **difficulty/accessibility dial** — see the story-mode
+  question below: slower decay or a floor = gentler game.)
+- **Dawdling blocks the queue**: while a job is overdue/decaying, **no new opportunities arrive**
+  until it is delivered. Suggested refinement (agent, for discussion): a **job capacity** (how
+  many you can hold at once) that is **upgradeable via the car economy**, with the offer queue
+  pausing whenever any held job goes into decay — so overcommitting is self-punishing.
+- **VIP / special deliveries carry the story.** Key moments become special by *removing* pressure,
+  not adding it: often **no timer at all**, so dialog can breathe and the player knows this one
+  matters. They can gate the end of the day or unlock freeform play. Natural home for the Mailman
+  sabotage beats.
+- Pairs with the impact systems already built: `OnStruck` means **driving quality can affect a
+  passenger's tip** (hits, near misses, kerb-hopping), and the insurance "woop" fires in the same
+  moment.
+- **VIP/special opportunities are exempt from the queue rules** and **can only be taken alone**
+  (author) — they never compete with routine work, which is part of what marks them as story.
+- **The day is the outer timer**: the real question each day is *how much can you pack in*. Job
+  capacity (a jeep upgrade — roof rack/storage) multiplies what a day can hold.
+- **Harder/farther deliveries pay more** — distance and difficulty scale the full value.
+- **The opportunity board**: a phone screen where multiple offers sit with their timers visibly
+  decaying, forcing the player to triage from short descriptions in the time available.
+- **The phone should be invaluable, annoying and distracting all at once** (author's words):
+  notification sounds, pop-up toasts, alerts competing for attention while you drive. The
+  corruption layer eventually turns this against the player.
+
 **The phone is the hub**, with multiple apps: delivery (built first), store, music, podcasts,
-**insurance**. Insurance/fines: hitting cars or pedestrians costs money. They liked the idea of
+**insurance**.
+
+**Phone as a 3D object (author, 2026-08-11):** the interface should be an actual **3D cellphone
+model**, probably **lower left** of the screen, not a flat full-screen UI. Apps envisioned:
+**navigation/mini-map** (possibly merged with the delivery app), **phone** (lore), **podcasts**
+(lore), **music** (lore), **delivery**, **insurance**, **banking** (or maybe just a balance
+indicator always on screen), **current time**, room for more. Navigate apps with the **d-pad**.
+**Held vs mounted (author, 2026-08-12):** until the player buys the **phone mount** upgrade the
+phone is *in their hand* — large, off to one side, **swaying into view on turns and bumps**,
+genuinely distracting; the mount locks it small and static in a corner. A boring-sounding upgrade
+made necessary by experience, and thematically perfect (the app is what makes you crash). Full
+notes in `docs/DESIGN_LISTS.md`, including the accessibility requirement that phone stabilisation
+also exist as a **settings toggle**, never only as a purchase.
+**The phone IS the mini-map** (author, 2026-08-12): the map is visible *only while the phone is
+out* — there is no always-on mini-map. Makes navigation a real cost and the mount upgrade
+valuable; de-risked by the world-space objective marker handling turn-by-turn. Author flagged it
+as **revisit-after-the-island-grows**. Full UX proposal and open questions: `docs/PHONE_UX.md`.
+Corruption layer targets this directly (apps glitching = jump scares). **Insurance "woop"**
+(author's idea, same day): hitting a car or damaging your own plays an annoying alert chirp and
+shows the insurance charge as your balance ticks down — the hook exists already:
+`ADGAIVehiclePawn::OnStruck` broadcasts who hit whom and how hard. Insurance/fines: hitting cars or pedestrians costs money. They liked the idea of
 **survival costs** — scraping by on a crappy gig job. *(Resolved 2026-08-10, see ratified
 decisions below: fines are one simple number, food/hunger is cut, rent stays.)*
 
@@ -70,6 +126,11 @@ who ruled on each; these are decided, not speculative):**
 - **Platforming is traversal, not challenge — with ONE exception:** a single delivery character
   who makes the player attempt annoying platforming challenges. The exception to the rule
   (character unassigned so far).
+- **Day/night cycle (author, 2026-08-11):** a real time-of-day cycle, with a **limited window to
+  do as many runs as possible** per day — the pressure that makes the day structure above bite.
+- **Weather (author, 2026-08-11):** at minimum **variable rain levels, affecting traction**
+  (pairs with the surface-resistance item); and eventually **horrible "monster weather"** for the
+  corrupted/late-game island.
 - **The vertical slice is "Day One":** wake at The Bushed Baby, Pam gossip, three deliveries (one
   normal, one dog treats, one water bottle to a polite young man near a small fire), rent notice
   at dusk, the mail truck idling across the street as you park at home.
@@ -82,6 +143,22 @@ point**, also requiring the interact press. The green arrow keeps marking object
 the author intends to shift to **something more subtle** eventually. Implementation home:
 `ADGDeliveryPointActor` gains an interact path (overlap = "in range", E = commit) and the
 subsystem gains a carried-package state; a person recipient ties into the NPC roster later.
+
+**OPEN QUESTION — is the game losable? (author, 2026-08-11, explicitly deferred "for a long
+time"):** does losing too much money mean starting over, or is the penalty something else? And
+should there be a **"story mode"** for players who struggle with games (disability or otherwise)
+and want the characters and story without the difficulty? Notes toward the answer:
+- A hard restart deletes the story, which is the reward — poor fit for a narrative game. The
+  author's own instinct on rent penalties was already **"pressure, not spiral"**.
+- A **narrative failure state** fits the tone better than a game over: miss rent enough and you
+  are evicted, sleep in the jeep, dialog changes, some content closes off — the island keeps
+  going and you keep playing, poorer.
+- **Story mode is cheap if planned early** and expensive if retrofitted: make the difficulty
+  surface a small set of multipliers (delivery timer generosity, fine scale, whether timers can
+  fail at all, traffic aggression) rather than hard-coded numbers. **Timers are the main
+  accessibility barrier** in a delivery game, so "timers never fail" is the single
+  highest-value toggle. The one platforming-challenge character ([[game-vision]] rule 10) is
+  exactly the kind of content such a mode should let players skip.
 
 **Characters and dialog:** interacting with NPCs opens a **2D branching dialog, RPG-style**
 (player portrait one side, NPC the other). Possible side quests. Characters should be interesting,

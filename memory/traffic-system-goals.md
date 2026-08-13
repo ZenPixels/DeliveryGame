@@ -25,6 +25,13 @@ test bed, not the target scale.
 **Why:** correctness of the *rules* beats fidelity to the old Blueprints, so a cleaner design that
 behaves properly is preferred over a faithful port. Do not spend effort reproducing original quirks.
 
+**Keep the player's viewpoint in mind (author, 2026-08-11):** "a player will be unlikely to sit
+there and watch random intersections — they could, but they would lose the game as we've defined
+it." Traffic only has to hold up **at delivery speed, from a moving jeep**. Bugs visible from the
+driver's seat (vehicles in your lane, wrecks blocking a route, standoffs you get stuck behind)
+matter; imperfections only visible while parked and staring at a junction do not. A useful test
+protocol: judge traffic while driving a delivery, not while spectating.
+
 **Traffic is kinematic, not physics** (author decision 2026-08-09, "hybrid: kinematic until hit").
 AI vehicles move via `UDGPathFollowComponent::MoveMode = Kinematic` — integrated speed, capped yaw
 rate toward the goal, transform set directly; Chaos stays for the player. Rationale: every
@@ -61,9 +68,21 @@ registry, `YieldStopDistance` as its own braking channel — the hold-refcount f
 unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-latch cooldown).
 
 **Author's next focus list (2026-08-10, in their priority order, after traffic dial-in):**
-1. **Player jeep feel** — "still feels clunky and not quite fun" (long-standing).
-2. **Collision/near-miss reactions** — how AI vehicles respond when the player hits or buzzes them
-   (pairs with the planned physics-on-impact layer).
+1. ~~**Player jeep feel**~~ — DONE 2026-08-10 (chassis tuning + scripted drift + camera; values on the
+   movement component, wheel BPs, and the jeep BP's drift/gravity events).
+2. ~~**Collision/near-miss reactions**~~ — BUILT 2026-08-11 (awaiting PIE validation). The
+   physics-on-impact layer: hit impulse ≥ `PhysicsImpactThreshold` (250k, tune from the STRUCK log
+   line) → `EDGImpactState` machine on ADGAIVehiclePawn: Simulating (full physics + arcade shove
+   from striker velocity) → settle → upright? → **Shaken** (`PostCrashPauseSeconds` — the
+   personality knob, set per instance; default 3s everywhere until instance values are set) →
+   Driving (UpdateDestination re-derives everything); not upright → **Wrecked** (permanent until a
+   tow/despawn system). Component gains `bSuspendedForPhysics` (kinematic must not fight the sim)
+   and `DodgeOffset` (self-relaxing lateral channel). **Near-miss dodge**: fast-closing player
+   within 14 m → swerve ~1.9 m away from the player's side + `HornSound` hook (null until an asset
+   is sourced). `OnStruck` delegate = the future fines/insurance hook. Deferred by design:
+   pull-over-to-curb and get-out-and-talk (they belong to the NPC/dialog era — that's the mailman
+   confrontation scene); AI-vs-AI impacts (kinematic pairs generate no hit events); corrupted
+   reactions (corruption era: a van that doesn't dodge, or pulls over and just sits there).
 3. **Randomized driver behavior** — the personality presets over existing knobs (below).
 4. **Audio tuning** — crash sounds and general car noise (CrashAudio/MetaSound plumbing exists).
 5. **Wheel rotation on kinematic vehicles** (author, 2026-08-10): Chaos used to animate the wheel
@@ -83,7 +102,15 @@ unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-l
 10. **Surface-dependent resistance** — road vs grass acceleration/grip (physical materials per
     surface; also affects AI if they ever route off-road).
 11. **Drift/skid marks** — decals left by the player during drift state (same trigger as #6).
-12. **Camera pitch clamp** (author, 2026-08-10): the player can rotate the camera under the world —
+12. **Drivers in AI vehicles** (author, 2026-08-11): the vans/bus are currently empty — they need a
+    **socket on each vehicle mesh for a seated driver character**, and eventually drivers who
+    **get out after an accident** (pairs with the impact-reaction states: Shaken/Wrecked are the
+    natural triggers). The jeep already does this — `BP_Vehicle_Jeep` has a `Driver` mesh
+    component + `DriverMesh` variable, set and shown on EventPossessed — so mirror that pattern.
+13. **Steering wheel animation** (author, 2026-08-11): attach the driver character's hands/model
+    to the steering wheel and **turn the wheel as the vehicle turns**. Same era as the kinematic
+    wheel-spin work (#5) — both are "vehicles look alive" anim-layer tasks.
+14. **Camera pitch clamp** (author, 2026-08-10): the player can rotate the camera under the world —
     a direct consequence of disabling the spring arm's collision probe for jump feel. Fix: custom
     PlayerCameraManager with ViewPitchMin ~ -25° / ViewPitchMax ~ +45° (author is even open to a
     fully height-locked cam with limited yaw), assigned via a BP PlayerController on the GameMode.
@@ -101,6 +128,26 @@ unnecessary; `YIELD`/`ARC` log lines for diagnosis; deadlock escape with 4s re-l
   classified from `PlannedNextPath`, which is known 2500 cm early; holds via the signal-hold
   channel — which first needs the **hold refcount fix** (single bool today); and a mandatory
   deadlock escape so four polite vans can't wave each other through forever.
+
+**Traffic population: spawn/despawn (author, 2026-08-11 — "another thing we'll need to add"):**
+The island currently runs **4 hand-placed vehicles**; a real city needs vehicles created and
+destroyed around the player. Author's reference: **GTA 3, which swapped traffic when you moved the
+camera** — so the rule is *never spawn or despawn in view*, camera-facing **plus proximity**.
+Design notes for when it's built:
+- `UDGTrafficSubsystem` is the natural home — it already owns the **path registry** (spawn points:
+  pick a path, a distance along it, the lane offset, the travel direction) and the **vehicle
+  registry** (population count, spacing checks).
+- Spawn candidates: on-path, outside the view frustum or beyond a radius, with clearance from
+  registered vehicles; despawn: behind the player, out of view, past a radius. Hysteresis between
+  the two radii or vehicles will pop in and out at the boundary.
+- **Personalities become presets at this point** (see below) — a spawner needs to roll a
+  personality, not copy instance values.
+- **This is also the wreck cleanup**: a wrecked vehicle nobody can see can simply be removed,
+  which is cheaper than the tow-truck idea (keep the tow truck as flavour, not as the mechanism).
+- Same system eventually spawns **pedestrians** (author has a prototype random pedestrian
+  generator with known bugs — see [[game-vision]]).
+- Watch the O(N²) right-of-way check when the population grows: it was fine for 4 vehicles, and
+  wants a spatial bucket before a city's worth.
 
 **Future traffic work the author has named** (do not build unprompted; design so they stay easy):
 - **Point-to-point routing**: vehicles planning a route between two locations over the spline graph

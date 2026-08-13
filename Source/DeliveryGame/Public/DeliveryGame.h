@@ -15,3 +15,11 @@ DECLARE_LOG_CATEGORY_EXTERN(LogDeliveryGame, Log, All);
  * DrawDebug* entirely regardless (ENABLE_DRAW_DEBUG=0), so this is a development convenience.
  */
 extern TAutoConsoleVariable<bool> CVarDGTrafficDebugDraw;
+
+/**
+ * On-screen developer readout (`dg.DebugHUD`): time of day, day number, money, jobs.
+ *
+ * Everything it prints is wrapped in `#if !UE_BUILD_SHIPPING`, so this is purely a development
+ * aid and costs a shipping build nothing. Placeholder until the phone shows this properly.
+ */
+extern TAutoConsoleVariable<bool> CVarDGDebugHUD;

@@ -390,6 +390,25 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Path Follow|State")
 	bool bInTurnArc = false;
 
+	/**
+	 * Kinematic driving is suspended: the owning pawn has handed the body to physics (player
+	 * impact). While set, this component must not move the actor — ProceedKinematic writing
+	 * transforms would fight the simulation every frame. Cleared by the pawn on recovery.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "Path Follow|State")
+	bool bSuspendedForPhysics = false;
+
+	/**
+	 * Transient lateral shift on top of LateralOffset, in cm — the near-miss dodge channel.
+	 * Positive shifts right of travel. Decays back to zero on its own; the pawn just pokes it.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "Path Follow|State")
+	float DodgeOffset = 0.f;
+
+	/** How quickly DodgeOffset relaxes back to zero, in cm/s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Path Follow|Steering", meta = (ClampMin = "1.0"))
+	float DodgeRelaxRate = 220.f;
+
 	// -------------------------------------------------------------- Yielding
 
 	/**

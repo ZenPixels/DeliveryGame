@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Delivery/DGDeliveryTypes.h"
 #include "GameFramework/Actor.h"
 #include "DGDeliveryPointActor.generated.h"
 
 class UBoxComponent;
+class UStaticMeshComponent;
 
 /**
  * A named place packages are collected from or delivered to. Native parent for the
@@ -45,9 +47,39 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Delivery")
 	TObjectPtr<UBoxComponent> Trigger;
 
+	/**
+	 * The parcel waiting to be collected. Created and driven from C++ on purpose: the same
+	 * component added through a Blueprint template never reached the placed instances — they
+	 * carry archetype overrides, so every point sat there with an empty mesh (2026-08-12).
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Delivery")
+	TObjectPtr<UStaticMeshComponent> ParcelMesh;
+
+	/** Show the parcel while this point is a pickup. Off for points that should look empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Delivery")
+	bool bShowParcelWhenPickup = true;
+
+	/** Parcel used when the job does not name one of its own. Per-point, so a bakery can box differently. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Delivery")
+	TObjectPtr<UStaticMesh> DefaultParcelMesh;
+
+	/** What this point is to the player right now. Maintained by UDGDeliverySubsystem. */
+	UPROPERTY(BlueprintReadOnly, Category = "Delivery")
+	EDGPointRole CurrentRole = EDGPointRole::None;
+
+	/**
+	 * Adopt a role: shows the parcel only where something is actually waiting to be collected.
+	 * @param ParcelMeshForRole  The waiting job's own parcel, or null to use DefaultParcelMesh.
+	 */
+	void ApplyRole(EDGPointRole NewRole, UStaticMesh* ParcelMeshForRole = nullptr);
+
 	/** Per-actor debug switch; dg.TrafficDebugDraw gates the lot, same contract as traffic. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Delivery|Debug")
 	bool bDrawDebug = false;
+
+	/** True while a player-controlled pawn is inside the trigger. Drives the interact prompt. */
+	UPROPERTY(BlueprintReadOnly, Category = "Delivery")
+	bool bPlayerInRange = false;
 
 	// ------------------------------------------------------------ BP hooks
 	// Visual dressing lives in the Blueprint children. Called by the subsystem.
@@ -64,6 +96,14 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Delivery")
 	void OnCleared();
 
+	/**
+	 * The player entered or left interaction range. Show/hide the "Press E" prompt here — the
+	 * prompt should appear whenever the player is in range at all, even with nothing to do, so
+	 * that the point reads as interactive rather than broken.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Delivery")
+	void OnPlayerInRangeChanged(bool bInRange);
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -73,4 +113,13 @@ protected:
 	void OnTriggerBeginOverlap(
 		UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp,
 		int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	UFUNCTION()
+	void OnTriggerEndOverlap(
+		UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp,
+		int32 OtherBodyIndex);
+
+private:
+	/** Player pawns only — AI traffic driving through a forecourt must not count. */
+	static bool IsPlayerPawn(const AActor* Actor);
 };

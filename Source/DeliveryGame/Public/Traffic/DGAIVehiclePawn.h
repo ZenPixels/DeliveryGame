@@ -11,6 +11,25 @@ class UBoxComponent;
 class UDGPathFollowComponent;
 class USoundBase;
 
+/** Where this vehicle stands in the hit-by-something lifecycle. */
+UENUM(BlueprintType)
+enum class EDGImpactState : uint8
+{
+	/** Normal kinematic traffic. */
+	Driving,
+
+	/** Knocked into full physics simulation; waiting to come to rest. */
+	Simulating,
+
+	/** Recovered and upright, sitting out the personality-scaled shaken pause. */
+	Shaken,
+
+	/** Settled but not upright — a permanent wreck until some future tow system exists. */
+	Wrecked,
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDGVehicleStruckEvent, AActor*, StruckBy, float, ImpulseMagnitude);
+
 /**
  * Base pawn for AI traffic vehicles. Native replacement for BP_AI_Vehicle_Base.
  *
@@ -171,6 +190,98 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|RightOfWay", meta = (ClampMin = "5.0", ClampMax = "80.0", Units = "deg"))
 	float YieldStraightAngle = 25.f;
 
+	// --------------------------------------------------------- Impact reaction
+	//
+	// The second half of the "hybrid: kinematic until hit" decision (author, 2026-08-09): a hard
+	// hit hands the body to full physics, the crash plays out honestly, and once the vehicle
+	// settles it recovers — with a personality-scaled pause — or stays wrecked if it's on its
+	// roof. Reactions are personality expressions: tune the pause per vehicle instance.
+
+	/** Hit impulse above which the vehicle is knocked out of kinematic driving into physics. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.0"))
+	float PhysicsImpactThreshold = 250000.f;
+
+	/** Arcade shove: fraction of the striker's velocity applied to this vehicle on takeover. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float ImpactShoveScale = 0.9f;
+
+	/** Speed below which the simulating body counts as settled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "1.0", Units = "cm/s"))
+	float SettleSpeed = 60.f;
+
+	/** Continuous settled seconds before recovery is attempted. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.1", Units = "s"))
+	float SettleTime = 1.2f;
+
+	/**
+	 * How long the driver sits shaken after recovering, before driving on. The personality knob:
+	 * the cautious van should sit much longer than the menace (set per instance alongside the
+	 * other personality values).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.0", Units = "s"))
+	float PostCrashPauseSeconds = 3.f;
+
+	/** Minimum dot(vehicle up, world up) to count as upright enough to recover. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float UprightDot = 0.7f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "AI Vehicle|Impact")
+	EDGImpactState ImpactState = EDGImpactState::Driving;
+
+	/**
+	 * Allow a single wheel to be torn off by a hard hit landing near it.
+	 *
+	 * The chassis-only simulation below is what stops **every** wheel flying off (handing the
+	 * whole skeletal mesh to physics ragdolls each body, and a big impulse rips the joints apart —
+	 * observed 2026-08-11, "too much and kind of silly"). This is the deliberate version: one
+	 * wheel, near the impact, only past WheelDetachImpulse.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact")
+	bool bAllowWheelDetach = true;
+
+	/**
+	 * Impulse needed to tear a wheel off. Deliberately an order of magnitude above
+	 * PhysicsImpactThreshold: measured player hits run ~500k for a shunt to ~4.5M for a
+	 * flat-out ram (2026-08-11 log), and at 700k every solid hit took a wheel. 3M keeps it for
+	 * the spectacular ones, per the author's "only the worst crashes" rule.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.0"))
+	float WheelDetachImpulse = 3000000.f;
+
+	/** How close to a wheel the impact must land to take it off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Impact", meta = (ClampMin = "0.0", Units = "cm"))
+	float WheelDetachRadius = 130.f;
+
+	/** Fired once when something knocks this vehicle into physics. The future fines/insurance hook. */
+	UPROPERTY(BlueprintAssignable, Category = "AI Vehicle|Impact")
+	FDGVehicleStruckEvent OnStruck;
+
+	/** Knock this vehicle into physics with a shove, as if hit. Also used by impacts internally. */
+	UFUNCTION(BlueprintCallable, Category = "AI Vehicle|Impact")
+	void EnterPhysicsReaction(AActor* StruckBy, const FVector& ShoveVelocity, float ImpulseMagnitude);
+
+	// ---------------------------------------------------------- Near-miss dodge
+
+	/** Range within which a fast-closing player counts as a threat worth dodging. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Dodge", meta = (ClampMin = "0.0", Units = "cm"))
+	float DodgeSenseRange = 1400.f;
+
+	/** Closing speed toward this vehicle that triggers the dodge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Dodge", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float DodgeCloseSpeed = 700.f;
+
+	/** How far the vehicle swerves off its lane, in cm. Relaxes back on its own. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Dodge", meta = (ClampMin = "0.0", Units = "cm"))
+	float DodgeAmount = 190.f;
+
+	/** Optional horn honked when dodging. Null-safe: silence until an asset is assigned. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Dodge")
+	TObjectPtr<USoundBase> HornSound;
+
+	/** Minimum seconds between horn honks. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Vehicle|Dodge", meta = (ClampMin = "0.0", Units = "s"))
+	float HornCooldown = 2.5f;
+
 	// ---------------------------------------------------------------- Debug
 
 	/** Draw the path-follow aim line and status text. */
@@ -293,4 +404,29 @@ private:
 
 	/** World time before which yields are ignored, set by the deadlock escape. */
 	float YieldSuppressedUntilTime = -1.f;
+
+	/** Drive the Simulating -> Shaken -> Driving recovery. */
+	void UpdateImpactReaction(float DeltaSeconds);
+
+	/** Swerve away from a fast-closing player. */
+	void UpdateNearMissDodge();
+
+	float TimeSettled = 0.f;
+	float TimeSimulating = 0.f;
+	float TimeShaken = 0.f;
+	float TimeSinceHorn = 1000.f;
+
+	/** Wheel bone names, read from the movement component's wheel setups rather than hard-coded. */
+	TArray<FName> WheelBoneNames;
+
+	/** A wheel came off: this vehicle never drives again, however upright it lands. */
+	bool bWheelDetached = false;
+
+	void CacheWheelBones();
+
+	/** Keep wheel bodies kinematic so only the chassis simulates — see bAllowWheelDetach. */
+	void LockWheelBodies() const;
+
+	/** Tear off the wheel nearest the impact, if one is close enough. */
+	bool TryDetachWheel(const FVector& ImpactPoint, const FVector& Impulse);
 };

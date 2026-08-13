@@ -8,6 +8,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "DeliveryGame.h"
 #include "DrawDebugHelpers.h"
+#include "Kismet/GameplayStatics.h"
 #include "Traffic/DGPathFollowComponent.h"
 #include "Traffic/DGTrafficLightActor.h"
 #include "Traffic/DGTrafficSubsystem.h"
@@ -151,6 +152,8 @@ void ADGAIVehiclePawn::BeginPlay()
 
 	// Start the cooldown expired so the first genuine impact is audible.
 	TimeSinceLastCrashSound = CrashSoundCooldown;
+
+	CacheWheelBones();
 
 	if (UDGTrafficSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<UDGTrafficSubsystem>() : nullptr)
 	{
@@ -559,6 +562,17 @@ void ADGAIVehiclePawn::UpdateYieldAwareness(float DeltaSeconds)
 		{
 			continue;
 		}
+
+		// Only living traffic has right of way. A wrecked or mid-crash vehicle keeps its last
+		// route state, so the scan below happily read a dead van as "arriving at the junction
+		// imminently" and every approach gave way to it — forever, since it never moves. Three
+		// vans stood at their give-way lines waiting for two corpses (author, 2026-08-11).
+		// Wrecks are still physical obstacles; that is the follow sensor's job, not this one's.
+		if (Other->ImpactState != EDGImpactState::Driving || Other->PathFollow->bSuspendedForPhysics)
+		{
+			continue;
+		}
+
 		const UDGPathFollowComponent* Theirs = Other->PathFollow;
 
 		FVector TheirJunction;
@@ -676,10 +690,302 @@ void ADGAIVehiclePawn::SyncBlockedState()
 	}
 }
 
+void ADGAIVehiclePawn::CacheWheelBones()
+{
+	WheelBoneNames.Reset();
+
+	// Read the bones from the vehicle's own wheel setups rather than hard-coding "wheelFL" etc:
+	// the van, bus and any future vehicle are free to name their bones however their rig does.
+	if (const UChaosWheeledVehicleMovementComponent* Movement =
+			Cast<UChaosWheeledVehicleMovementComponent>(GetVehicleMovementComponent()))
+	{
+		for (const FChaosWheelSetup& Setup : Movement->WheelSetups)
+		{
+			if (!Setup.BoneName.IsNone())
+			{
+				WheelBoneNames.AddUnique(Setup.BoneName);
+			}
+		}
+	}
+}
+
+void ADGAIVehiclePawn::LockWheelBodies() const
+{
+	USkeletalMeshComponent* VehicleMesh = GetMesh();
+	if (!VehicleMesh)
+	{
+		return;
+	}
+
+	for (const FName& Bone : WheelBoneNames)
+	{
+		VehicleMesh->SetAllBodiesBelowSimulatePhysics(Bone, /*bNewSimulate=*/false, /*bIncludeSelf=*/true);
+	}
+}
+
+bool ADGAIVehiclePawn::TryDetachWheel(const FVector& ImpactPoint, const FVector& Impulse)
+{
+	USkeletalMeshComponent* VehicleMesh = GetMesh();
+	if (!VehicleMesh || WheelBoneNames.IsEmpty() || bWheelDetached)
+	{
+		return false;
+	}
+
+	FName Nearest = NAME_None;
+	float NearestDistSq = FMath::Square(WheelDetachRadius);
+	for (const FName& Bone : WheelBoneNames)
+	{
+		const float DistSq = FVector::DistSquared(VehicleMesh->GetBoneLocation(Bone), ImpactPoint);
+		if (DistSq < NearestDistSq)
+		{
+			NearestDistSq = DistSq;
+			Nearest = Bone;
+		}
+	}
+
+	// Hit the middle of the door, not a corner: nothing comes off.
+	if (Nearest.IsNone())
+	{
+		return false;
+	}
+
+	// This one body goes free while the rest stay welded — then break the joint holding it on.
+	VehicleMesh->SetAllBodiesBelowSimulatePhysics(Nearest, /*bNewSimulate=*/true, /*bIncludeSelf=*/true);
+	VehicleMesh->BreakConstraint(Impulse * 0.25f, ImpactPoint, Nearest);
+	bWheelDetached = true;
+
+	// Damp the orphan. A wheel body carries almost no damping — it never needed any, since the
+	// driving sim supplied its resistance — so once free it rolled on its edge indefinitely and
+	// drifted off down the island (2026-08-11: funny for about ten seconds). This lets it bounce
+	// and roll a few metres, then lie down.
+	if (FBodyInstance* WheelBody = VehicleMesh->GetBodyInstance(Nearest))
+	{
+		WheelBody->LinearDamping = 0.8f;
+		WheelBody->AngularDamping = 3.f;
+		WheelBody->UpdateDampingProperties();
+	}
+
+	UE_LOG(LogDeliveryGame, Log, TEXT("%s lost wheel '%s' to a %.0f impulse hit."),
+		*GetName(), *Nearest.ToString(), Impulse.Size());
+	return true;
+}
+
+void ADGAIVehiclePawn::EnterPhysicsReaction(AActor* StruckBy, const FVector& ShoveVelocity, float ImpulseMagnitude)
+{
+	if (ImpactState != EDGImpactState::Driving)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* VehicleMesh = GetMesh();
+	if (!VehicleMesh)
+	{
+		return;
+	}
+
+	ImpactState = EDGImpactState::Simulating;
+	TimeSettled = 0.f;
+	TimeSimulating = 0.f;
+
+	// Hand the body to physics BEFORE shoving it; the component must stop writing transforms the
+	// same frame or it teleports the simulation back every tick.
+	if (PathFollow)
+	{
+		PathFollow->bSuspendedForPhysics = true;
+		PathFollow->DodgeOffset = 0.f;
+	}
+	VehicleMesh->SetSimulatePhysics(true);
+
+	// Chassis only. SetSimulatePhysics ragdolls every body in the physics asset, so a hard hit
+	// tore all four wheels off their joints at once — silly rather than dramatic. Kinematic wheel
+	// bodies ride the simulating chassis instead; TryDetachWheel is the sanctioned way to lose one.
+	LockWheelBodies();
+
+	// The contact itself often transfers poorly to a body that was kinematic when it happened —
+	// apply the striker's velocity as an explicit arcade shove so the hit visibly lands.
+	VehicleMesh->AddImpulse(ShoveVelocity * ImpactShoveScale, NAME_None, /*bVelChange=*/true);
+
+	UE_LOG(LogDeliveryGame, Log, TEXT("%s STRUCK by %s (impulse %.0f): physics takeover."),
+		*GetName(), *GetNameSafe(StruckBy), ImpulseMagnitude);
+
+	OnStruck.Broadcast(StruckBy, ImpulseMagnitude);
+}
+
+void ADGAIVehiclePawn::UpdateImpactReaction(float DeltaSeconds)
+{
+	USkeletalMeshComponent* VehicleMesh = GetMesh();
+
+	switch (ImpactState)
+	{
+	case EDGImpactState::Simulating:
+	{
+		if (!VehicleMesh)
+		{
+			return;
+		}
+		TimeSimulating += DeltaSeconds;
+
+		const float Speed = VehicleMesh->GetComponentVelocity().Size();
+		TimeSettled = (Speed < SettleSpeed) ? TimeSettled + DeltaSeconds : 0.f;
+
+		// 30 s cap: a body wedged into geometry can jitter forever without ever "settling".
+		if (TimeSettled < SettleTime && TimeSimulating < 30.f)
+		{
+			return;
+		}
+
+		// A vehicle missing a wheel is done regardless of which way up it stops.
+		const bool bUpright = !bWheelDetached &&
+			FVector::DotProduct(VehicleMesh->GetUpVector(), FVector::UpVector) >= UprightDot;
+
+		if (!bUpright)
+		{
+			ImpactState = EDGImpactState::Wrecked;
+
+			// **Physics stays on.** A wreck is a prop from here on: the player should be able to
+			// shove it down the street, and anything that hits it should move it. Freezing it
+			// here made a dead van the most immovable object on the island (author, 2026-08-11:
+			// "at that point it should be nothing but physics").
+			UE_LOG(LogDeliveryGame, Log, TEXT("%s is wrecked (%s); left to physics."),
+				*GetName(), bWheelDetached ? TEXT("lost a wheel") : TEXT("not upright"));
+			return;
+		}
+
+		// Recovering, so the simulation must stop before kinematic driving resumes — the two
+		// fight for the transform otherwise.
+		VehicleMesh->SetSimulatePhysics(false);
+
+		// Flatten to yaw-only so kinematic driving does not resume mid-lean.
+		SetActorRotation(FRotator(0.f, GetActorRotation().Yaw, 0.f));
+
+		ImpactState = EDGImpactState::Shaken;
+		TimeShaken = 0.f;
+		UE_LOG(LogDeliveryGame, Log, TEXT("%s recovered upright; shaken for %.1fs."),
+			*GetName(), PostCrashPauseSeconds);
+		return;
+	}
+
+	case EDGImpactState::Shaken:
+	{
+		TimeShaken += DeltaSeconds;
+		if (TimeShaken < PostCrashPauseSeconds)
+		{
+			return;
+		}
+
+		if (PathFollow)
+		{
+			PathFollow->bSuspendedForPhysics = false;
+			PathFollow->KinematicSpeed = 0.f;
+			// UpdateDestination re-derives progress from wherever the crash left us — including
+			// the off-road re-acquire and the low-speed direction flip if we ended up backwards.
+			PathFollow->UpdateDestination();
+			PathFollow->StartMoving();
+		}
+		ImpactState = EDGImpactState::Driving;
+		UE_LOG(LogDeliveryGame, Log, TEXT("%s driving again after crash."), *GetName());
+		return;
+	}
+
+	case EDGImpactState::Wrecked:
+	{
+		// Interim cleanup until the spawn/despawn population system exists (see memory:
+		// traffic-system-goals). A wreck is a permanent lane blocker — traffic queues behind it
+		// forever — and a badly-launched one can end up kilometres off the map still drifting.
+		// GTA-3 rule, per the author: only remove it when nobody can see it, and never near the
+		// player, so the wreck stays available to shove around as long as it is being watched.
+		//
+		// Constants are local rather than properties on purpose: this shipped mid-session and
+		// Live Coding cannot add reflected members. Promote them when the population system lands.
+		constexpr float WreckMinLifetime = 25.f;
+		constexpr float WreckKeepRadius = 6000.f;
+
+		// TimeSimulating is free once the crash has resolved; reused here as "time spent wrecked".
+		TimeSimulating += DeltaSeconds;
+		if (TimeSimulating < WreckMinLifetime || WasRecentlyRendered(0.5f))
+		{
+			return;
+		}
+
+		if (const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+		{
+			if (FVector::Dist(Player->GetActorLocation(), GetActorLocation()) < WreckKeepRadius)
+			{
+				return;
+			}
+		}
+
+		UE_LOG(LogDeliveryGame, Log, TEXT("%s wreck cleared (unseen for %.0fs)."),
+			*GetName(), TimeSimulating);
+		Destroy();
+		return;
+	}
+
+	default:
+		return;
+	}
+}
+
+void ADGAIVehiclePawn::UpdateNearMissDodge()
+{
+	if (ImpactState != EDGImpactState::Driving || !PathFollow ||
+		!PathFollow->bIsMoving || PathFollow->bInTurnArc)
+	{
+		return;
+	}
+
+	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!Player)
+	{
+		return;
+	}
+
+	const FVector MyLocation = GetActorLocation();
+	const FVector ToMe = MyLocation - Player->GetActorLocation();
+	const float Distance = ToMe.Size2D();
+	if (Distance > DodgeSenseRange || Distance < KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	// Threat = the player's velocity carrying them at us, fast.
+	const float ClosingSpeed = FVector::DotProduct(Player->GetVelocity(), ToMe.GetSafeNormal2D());
+	if (ClosingSpeed < DodgeCloseSpeed)
+	{
+		return;
+	}
+
+	// Swerve away from whichever side the player is on; a dead-centre rear approach breaks the
+	// tie toward the right shoulder, which is where a startled driver goes.
+	const float SideOfPlayer = FVector::DotProduct(-ToMe, GetActorRightVector());
+	const float Direction = (SideOfPlayer > 20.f) ? -1.f : 1.f;
+	PathFollow->DodgeOffset = Direction * DodgeAmount;
+
+	if (HornSound && TimeSinceHorn >= HornCooldown)
+	{
+		TimeSinceHorn = 0.f;
+		UGameplayStatics::PlaySoundAtLocation(this, HornSound, MyLocation);
+	}
+}
+
 void ADGAIVehiclePawn::OnMeshHit(
-	UPrimitiveComponent* /*HitComponent*/, AActor* /*OtherActor*/, UPrimitiveComponent* /*OtherComp*/,
+	UPrimitiveComponent* /*HitComponent*/, AActor* OtherActor, UPrimitiveComponent* /*OtherComp*/,
 	FVector NormalImpulse, const FHitResult& Hit)
 {
+	// A hard enough hit knocks the vehicle out of kinematic driving entirely. Checked before the
+	// audio path so the crash sound and the physics takeover come from the same impact.
+	const float HitImpulse = NormalImpulse.Size();
+	if (ImpactState == EDGImpactState::Driving && HitImpulse >= PhysicsImpactThreshold)
+	{
+		const FVector Shove = OtherActor ? OtherActor->GetVelocity() : FVector::ZeroVector;
+		EnterPhysicsReaction(OtherActor, Shove, HitImpulse);
+
+		if (bAllowWheelDetach && HitImpulse >= WheelDetachImpulse)
+		{
+			TryDetachWheel(Hit.ImpactPoint, NormalImpulse);
+		}
+	}
+
 	// Only CrashAudio is required. The Blueprint's audio component already has its MetaSound
 	// assigned, so requiring the CrashSound override here would silence every existing vehicle.
 	if (!CrashAudio || !CrashAudio->GetSound())
@@ -739,11 +1045,22 @@ void ADGAIVehiclePawn::Tick(float DeltaSeconds)
 	// end-overlap once left a vehicle believing something was at its bumper forever — frozen 10 m
 	// off-road with nothing near it. Four vehicles querying two volumes each is trivial; a stale
 	// clearance is not.
+	UpdateImpactReaction(DeltaSeconds);
+	TimeSinceHorn += DeltaSeconds;
+
+	// While physics owns the body, the driving senses are moot — and cheaper skipped.
+	if (ImpactState == EDGImpactState::Simulating || ImpactState == EDGImpactState::Wrecked)
+	{
+		return;
+	}
+
 	RecomputeOverlapBlockers();
 
 	UpdateSignalAwareness();
 
 	UpdateYieldAwareness(DeltaSeconds);
+
+	UpdateNearMissDodge();
 
 	if (bDrawDebugColliders && CVarDGTrafficDebugDraw.GetValueOnGameThread())
 	{
